@@ -1,6 +1,6 @@
 // Cache only the public shell, never API responses, credentials or transcripts.
 const CACHE = 'orchestrator-shell-v1';
-const ASSETS = ['/', '/app.js', '/voice.js', '/cluster-client.js', '/styles.css'];
+const ASSETS = ['/', '/app.js', '/diagnostics.js', '/voice.js', '/cluster-client.js', '/styles.css'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then(async (cache) => {
     for (const asset of ASSETS) {

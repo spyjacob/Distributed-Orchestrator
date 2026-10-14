@@ -1,5 +1,5 @@
 // Compare live processes, never infer a running version from a peer's checkout.
-export async function harnessVersions(cluster, local, { request = fetch } = {}) {
+export async function harnessVersions(cluster, local, { request = fetch, observe = () => {} } = {}) {
   const hosts = await Promise.all(cluster.replica.members().map(async host => {
     try {
       let status = local;
@@ -12,6 +12,7 @@ export async function harnessVersions(cluster, local, { request = fetch } = {}) 
         status = await response.json();
         if (status.node !== host.id) throw new Error('identity mismatch');
       }
+      try { observe(host.id, status.version); } catch {}
       const version = status.version;
       const update = status.update || {};
       const state = !version?.revision ? 'Version unavailable — update this machine'
@@ -23,7 +24,7 @@ export async function harnessVersions(cluster, local, { request = fetch } = {}) 
         : update.error ? 'Update check failed'
         : update.skipped ? `Update check paused: ${update.skipped}` : 'Same running commit';
       return { id: host.id, name: host.name, version, update, state, busy: Boolean(status.busy), restarting: Boolean(status.restarting) };
-    } catch { return { id: host.id, name: host.name, state: 'Unreachable — version unverified' }; }
+    } catch { try { observe(host.id, null); } catch {} return { id: host.id, name: host.name, state: 'Unreachable — version unverified' }; }
   }));
   return { version: local.version, hosts, checkedAt: new Date().toISOString(),
     aligned: hosts.length > 0 && hosts.every(h => h.state === 'Same running commit') };

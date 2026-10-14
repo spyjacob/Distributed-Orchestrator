@@ -11,6 +11,7 @@
  * URL once and then kept in a cookie.
  */
 
+import { diagnostics } from '../src/core/diagnostics.js';
 import { runtimeAI } from '../src/core/app-ai.js';
 import { createMessageQueue } from '../src/core/message-queue.js';
 import { defaultDataDir } from '../src/core/platform.js';
@@ -31,6 +32,7 @@ import { deviceInventory } from '../src/core/cluster/devices.js';
 import { hostPairing } from '../src/core/cluster/pairing.js';
 import { executionHosts, executionOwner, assignmentError, sessionWriteError, recoverStoppedTurn } from '../src/core/cluster/execution.js';
 import { createCluster } from '../src/core/cluster/index.js';
+import { projectRecovery } from '../src/core/cluster/project-recovery.js';
 import { harnessVersions } from '../src/core/harness-version.js';
 import { createNodes } from '../src/core/nodes.js';
 import { createAISources } from '../src/core/ai-sources.js';
@@ -94,6 +96,15 @@ const inventory = deviceInventory(USER_DATA);
 const aiSources = createAISources(USER_DATA);
 
 let cluster = null;
+let usageHistory = null;
+const observedVersions = new Map();
+function observeVersion(peer, version) {
+  const value = version?.revision || 'unavailable';
+  if (observedVersions.get(peer) === value) return;
+  observedVersions.set(peer, value);
+  usageHistory?.record(version ? 'peer.version' : 'peer.unavailable', { peer, observedRevision: version?.revision });
+}
+let recovery = null;
 let pairing = null;
 let workspaces = null;
 let placement = null;
@@ -470,6 +481,7 @@ async function requireConnection() {
 }
 
 async function scheduleTurn(id, body, queueNext = false) {
+  usageHistory?.record('turn.requested', { correlationId: body.traceId });
   const queued = messageQueue.busy(id);
   let acknowledge, refuse;
   const started = new Promise((resolve, reject) => { acknowledge = resolve; refuse = reject; });
@@ -551,9 +563,10 @@ async function dispatchMessage(id, body, reply) {
   // goes quiet for many minutes while running its own loop.
   beacons.start(id, { model: session.model, stallMs: stallMsFor(cfg.models[session.model]) });
   reply(200, { ok: true }); // answer now; the work streams over SSE
+  usageHistory?.record('turn.started', { correlationId: body.traceId });
   broadcast(id, { kind: 'started', startedAt: turn.startedAt });
 
-  let prepared = false;
+  let prepared = false, turnFailed = false;
   await Promise.resolve().then(async () => {
     if (cfg.models[session.model]?.sourceKind === 'ollama') await aiSources.prepare(cfg.models[session.model].model);
     if (session.mode !== 'chat' && !session.monitorFor) {
@@ -588,7 +601,9 @@ async function dispatchMessage(id, body, reply) {
         // Any sign of life counts: a token, a tool starting, a tool ending.
         beacons.touch(id, delta.kind === 'tool_start' ? `${delta.call?.name} ${describeArg(delta.call)}` : delta.kind);
         if (delta.kind === 'tool_start') turn.last = delta.call?.name ?? null;
+        if (delta.kind === 'tool_end') usageHistory?.record('turn.tool', { correlationId: body.traceId, outcome: delta.result?.ok ? 'ok' : 'error' });
         if (delta.kind === 'rate_limit') {
+          usageHistory?.record('turn.rate-limit', { correlationId: body.traceId });
           providerLimits.set(session.model, { info: delta.info, at: Date.now() });
           if (usage) {
             usage.limits[session.model] = { info: delta.info, at: Date.now() };
@@ -600,6 +615,8 @@ async function dispatchMessage(id, body, reply) {
     });
   })
     .catch(async (e) => {
+      turnFailed = true;
+      usageHistory?.record('turn.error', { correlationId: body.traceId });
       const event = noteEvent(e?.message ?? String(e));
       session.events.push(event);
       await store.save(session);
@@ -642,6 +659,7 @@ async function dispatchMessage(id, body, reply) {
       running.delete(id);
       live.delete(id);
       broadcast(id, { kind: 'done' });
+      usageHistory?.record('turn.finished', { correlationId: body.traceId, outcome: turnFailed ? 'error' : controller.signal.aborted ? 'cancelled' : 'completed', durationMs: Date.now() - turn.startedAt });
       collectUsage().catch(() => {}); // fold the turn in; never block the reply
 
       // Tell the user it finished. Deliberately after `done`, and never
@@ -672,6 +690,7 @@ async function dispatchMessage(id, body, reply) {
       running.delete(id);
       live.delete(id);
       beacons.stop(id);
+      usageHistory?.record('turn.error', { correlationId: body.traceId });
       broadcast(id, { kind: 'error', error: e?.message ?? String(e) });
       broadcast(id, { kind: 'done' });
     });
@@ -680,10 +699,22 @@ async function dispatchMessage(id, body, reply) {
 
 async function joinHost(body) {
   if (running.size) throw new Error('Wait for this host’s running turns to finish before joining.');
-  const sessions = await Promise.all((await store.list()).map((s) => store.load(s.id, { repair: false })));
-  for (const session of sessions) await clusterAssets.session(session, true);
-  const values = Object.fromEntries(Object.entries(cluster.replica.state.values).filter(([id]) => id.startsWith('asset:')));
-  return cluster.join(body, sessions, values);
+  const correlationId = crypto.randomUUID(), started = Date.now();
+  await recovery.trace('join.request', { correlationId });
+  try {
+    // Preserve the local registry in the pre-join archive, before any replacement.
+    await snapshotSettings();
+    const sessions = await Promise.all((await store.list()).map((s) => store.load(s.id, { repair: false })));
+    for (const session of sessions) await clusterAssets.session(session, true);
+    const values = Object.fromEntries(Object.entries(cluster.replica.state.values).filter(([id]) => id.startsWith('asset:')));
+    const projects = (await apps.load(USER_DATA)).filter(a => !a.builtin);
+    const result = await cluster.join(body, sessions, values, projects);
+    await recovery.trace('join.imported', { correlationId, projects: projects.length, tabs: sessions.length, durationMs: Date.now() - started });
+    return result;
+  } catch (error) {
+    await recovery.trace('join.error', { correlationId, durationMs: Date.now() - started });
+    throw error;
+  }
 }
 
 // ------------------------------------------------------------------ routing
@@ -717,6 +748,55 @@ const server = http.createServer(async (req, res) => {
       '<h2>Distributed Orchestrator</h2><p>This link needs its access token. Open the full URL printed on the laptop.</p></body>');
   }
 
+  const requestStarted = Date.now();
+  const requestId = /^[a-zA-Z0-9-]{1,100}$/.test(req.headers['x-harness-trace'] || '')
+    ? req.headers['x-harness-trace'] : crypto.randomUUID();
+  if (pathname.startsWith('/api/') && !pathname.startsWith('/api/diagnostics')) {
+    const route = pathname.split('/').slice(1, 3).join('.');
+    res.once('finish', () => {
+      const durationMs = Date.now() - requestStarted;
+      // Routine replication heartbeats otherwise bury the user's interactions.
+      if (pathname === '/api/cluster/rpc' && res.statusCode < 400 && durationMs < 1000) return;
+      usageHistory?.record('request.finished', { correlationId: requestId,
+        route, method: req.method, status: res.statusCode, durationMs });
+    });
+    res.once('close', () => { if (!res.writableFinished) usageHistory?.record('request.aborted', { correlationId: requestId, route }); });
+  }
+  if (pathname === '/api/diagnostics') {
+    try {
+      const target = url.searchParams.get('host');
+      if (target && target !== cluster.self.id) {
+        if (cluster.trusted(req)) return json(res, 400, { error: 'Diagnostics forwarding loop refused.' });
+        if (!cluster.replica.members().some(h => h.id === target)) return json(res, 404, { error: 'Unknown computer.' });
+        return cluster.proxy(req, res, target);
+      }
+      if (req.method === 'GET' && url.searchParams.get('action') === 'all') {
+        const histories = await Promise.all(cluster.replica.members().map(async h => {
+          try {
+            if (h.id === cluster.self.id) return await usageHistory.run('events');
+            const r = await fetch(new URL('/api/diagnostics?action=events', h.url), {
+              headers: { 'x-cluster-key': cluster.replica.disk.secret }, signal: AbortSignal.timeout(5000), redirect: 'error' });
+            if (!r.ok) throw Error('unavailable');
+            const data = await r.json();
+            if (data.host !== h.id) throw Error('identity mismatch');
+            await usageHistory.record('peer.observed', { peer: h.id, observedRevision: data.revision });
+            return data;
+          } catch { return { host: h.id, unavailable: true }; }
+        }));
+        return json(res, 200, { histories });
+      }
+      if (req.method === 'GET') return json(res, 200, await usageHistory.run(url.searchParams.get('action') || 'status', { before: url.searchParams.get('before') }));
+      if (req.method !== 'POST') return json(res, 405, { error: 'POST required.' });
+      const body = await readBody(req, 65536);
+      if (body.action === 'append') {
+        if (!Array.isArray(body.events) || body.events.length > 100) throw Error('Supply at most 100 events.');
+        for (const event of body.events) await usageHistory.record('browser.' + (['action','visible','request','error','lifecycle'].includes(event.event) ? event.event : 'unknown'), event);
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 200, await usageHistory.run(body.action, body));
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+
   // First hit carries ?t=; stow it in a cookie so later navigations are clean.
   if (url.searchParams.has('t')) {
     res.setHeader('Set-Cookie', `ht=${cluster?.verifyTicket(url.searchParams.get('t')) ? url.searchParams.get('t') : TOKEN}; Path=/; Max-Age=31536000; SameSite=Lax`);
@@ -730,7 +810,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname.startsWith('/api/cluster/')) {
       const route = pathname.slice('/api/cluster/'.length);
-      const internal = ['rpc', 'command', 'activate', 'read-session', 'worker-save', 'worker-models', 'worker-help', 'model-secret', 'worker-stopped', 'worker-sources'];
+      const internal = ['rpc', 'command', 'activate', 'read-session', 'worker-save', 'worker-models', 'worker-help', 'model-secret', 'worker-stopped', 'worker-sources', 'worker-recovery', 'read-projects'];
       if (internal.includes(route) && !cluster.trusted(req)) return json(res, 403, { error: 'Cluster authentication required' });
       if (req.method === 'GET' && route === 'discover') return json(res, 200, await pairing.discover());
       if (req.method === 'GET' && route === 'status') return json(res, 200, cluster.status());
@@ -743,6 +823,14 @@ const server = http.createServer(async (req, res) => {
       if (req.method !== 'POST') return json(res, 405, { error: 'POST required' });
       if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON required' });
       const body = await readBody(req, 500_000_000); // snapshots carry project checkpoints
+      if (route === 'read-projects') return json(res, 200, { apps: await cluster.readProjects() });
+      if (route === 'recovery' || route === 'worker-recovery') {
+        try {
+          const { host = cluster.self.id, ...request } = body;
+          return json(res, 200, route === 'worker-recovery' || host === cluster.self.id
+            ? await recovery.run(request) : await cluster.hostRecovery(host, request));
+        } catch (error) { return json(res, 400, { error: error.message }); }
+      }
       if (route === 'read-session') {
         if (!cluster.replica.writable()) return json(res, 503, { error: 'Coordinator unavailable.' });
         const session = cluster.replica.state.sessions[body.id];
@@ -810,6 +898,7 @@ const server = http.createServer(async (req, res) => {
         await cluster.command({ type: 'preferred', id: body.id }); return json(res, 200, { ok: true });
       }
       if (route === 'admit') {
+        if (body.projectImportVersion !== 1) return json(res, 409, { error: 'Update and restart Harness on the joining computer before joining, so its projects are preserved.' });
         if (invited && !cluster.validInvite(req.headers['x-harness-token'])) return json(res, 403, { error: 'Approval expired or was already used.' });
         if (invited && !cluster.matchesInvite(body.member)) return json(res, 403, { error: 'Approval belongs to a different host.' });
         if (invited) cluster.consumeInvite(); // reserve before any asynchronous snapshot work
@@ -886,7 +975,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return serveStatic(res, 'index.html');
     }
-    if (req.method === 'GET' && /^\/(app\.js|voice\.js|cluster-client\.js|sw\.js|styles\.css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app\.js|diagnostics\.js|voice\.js|cluster-client\.js|sw\.js|styles\.css)$/.test(pathname)) {
       return serveStatic(res, pathname.slice(1));
     }
 
@@ -1308,7 +1397,7 @@ const server = http.createServer(async (req, res) => {
         version: loadedVersion, update: harnessUpdate });
     }
     if (req.method === 'GET' && pathname === '/api/harness/versions') {
-      return json(res, 200, await harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate, busy: Boolean(running.size || messageQueue.size), restarting }));
+      return json(res, 200, await harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate, busy: Boolean(running.size || messageQueue.size), restarting }, { observe: observeVersion }));
     }
     if (req.method === 'POST' && pathname === '/api/harness/restart') {
       if (restarting) return json(res, 409, { error: 'A restart is already in progress.' });
@@ -1965,7 +2054,7 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         if ((!body.text || !String(body.text).trim()) && !body.attachments?.length) return json(res, 400, { error: 'Enter a message or attach a file.' });
         try {
-          const queued = await scheduleTurn(id, body, verb === 'queue');
+          const queued = await scheduleTurn(id, { ...body, traceId: requestId }, verb === 'queue');
           return json(res, queued ? 202 : 200, { ok: true, queued });
         } catch (e) { return json(res, 409, { error: e.message }); }
       }
@@ -1991,6 +2080,21 @@ function lanAddress() {
 await store.init(USER_DATA);
 TOKEN = await resolveToken(USER_DATA);
 cluster = await createCluster(USER_DATA, { port: PORT });
+usageHistory = diagnostics(USER_DATA, cluster.self.id, loadedVersion.revision);
+await usageHistory.record('server.started');
+let lastHealth = '';
+setInterval(() => {
+  const status = cluster.status();
+  const health = { leader: status.leader, role: status.role, term: status.term, conflicts: status.conflicts,
+    count: status.hosts.filter(h => h.active).length };
+  const value = JSON.stringify(health);
+  if (value !== lastHealth) {
+    lastHealth = value; usageHistory.record('cluster.changed', health);
+    harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate },
+      { observe: observeVersion }).catch(() => {});
+  }
+}, 10000).unref();
+recovery = projectRecovery(cluster, USER_DATA, loadedVersion.revision, usageHistory.record);
 pairing = hostPairing({ cluster, inventory, join: joinHost, publish: async () => {
   // Reuses the Phone access routine: it never replaces an existing Serve route.
   const n = await setupPhoneAccess(PORT);
@@ -2019,7 +2123,7 @@ setInterval(async () => {
     const result = await syncHarnessCheckout(harnessDir, { busy: () => Boolean(restarting || running.size || messageQueue.size) });
     harnessUpdate = { ...result, checkedAt: new Date().toISOString(), restartRequired: Boolean(loadedRevision && result.head !== loadedRevision) };
     if (result.skipped || !result.published || cluster.replica.role !== 'leader') return;
-    const versions = await harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate });
+    const versions = await harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate }, { observe: observeVersion });
     if (!versions.hosts.some(host => host.version?.revision && host.version.revision !== result.head)) return;
     harnessUpdate.phase = 'Waiting for all machines; automatic restart queued';
     await restartPeers(cluster, { targetRevision: result.head });

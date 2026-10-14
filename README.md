@@ -106,6 +106,74 @@ or a Git problem prevent an update, resolve that problem before retrying.
 
 ## Development
 
+Settings → **Usage history · diagnostics** selects a computer and shows history
+size, file count, available disk, effective budget, and dropped/write-failure
+counts. Recording, retention, and the budget are local settings. Clear removes
+that computer's usage history, not transcripts or project recovery archives.
+“Recent history” downloads up to 1,000 events.
+
+The default is 2 GiB (2048 MB) per computer / 14 days, configurable from 4–2048 MB / 1–90 days.
+JSONL files rotate at 4 MB or one day. Retention removes expired segments;
+the effective budget is capped at 5% of available space plus current trace
+storage. Recording suspends below 2 GiB free. These are compact metadata logs,
+not video: even 100,000 events at roughly 500 bytes is about 50 MB.
+The browser buffers at most 100 events; the server admits at most 1,000 pending
+writes. Overload drops telemetry rather than breaking work.
+
+Files live in the server-owned `diagnostics/` directory under its data directory,
+outside Git. Coding assistants must use authenticated APIs, not read protected
+files. Use the same local origin/authentication as the activity command:
+
+- `GET /api/diagnostics` — local storage/settings and serving revision.
+- `GET /api/diagnostics?action=events` — latest 1,000 events; pass the returned
+  `nextBefore` as URL-encoded `before` to page older retained events.
+- `GET /api/diagnostics?action=all` — recent history from every reachable host;
+  unavailable hosts are marked, never silently substituted.
+- Add `host=<member-id>` to inspect an individual host.
+- `POST /api/diagnostics` with `action: settings`, `enabled`, `maxMB`, `days`,
+  or `action: clear` changes only the selected host.
+
+History includes browser/page IDs, phone/tablet/computer category, viewport,
+control identifiers, screen states, connectivity, request/turn timing, HTTP
+outcomes, cluster transitions, and observed peer revisions. Correlation IDs
+link clicks and ensuing requests across proxies. Ingest timestamps and browser
+timestamps are separate; clocks may differ. No text, input values, request
+bodies, query strings, credentials, or screenshots are recorded. Events are
+best-effort and older history is intentionally evicted. Turn completion records
+describe server execution, not delivery to the browser.
+
+Phone history stays on its serving host. Nothing is replicated or uploaded;
+the combined endpoint fetches histories on demand. Future Harness experience
+reviews are instructed to read these APIs and distinguish evidence from
+inference. See [the reliability review](docs/reliability-review.md) for findings,
+test scope, and remaining two-host tradeoffs.
+
+Joining a network imports the joining computer's project registry and tabs as
+one operation, preserving their original owner. Both computers must run the
+updated join protocol. The pre-join history remains archived even if importing
+is interrupted.
+
+If projects disappeared after pairing or a replication conflict, open **Apps &
+Chats → recover projects** after updating and restarting every paired computer.
+Recovery searches each computer's pre-join/conflict archives and local session
+records. Select a project to restore its registry entry and missing tabs; current
+records win. Previously deleted projects may appear, so recovery is explicit.
+This restores metadata, not deleted files. A project inferred only from a tab
+has no recovered launch command; its original computer and folder are still
+needed. Unreachable computers and unreadable archives are reported in the sheet.
+
+Join/recovery traces are server-owned at `cluster/project-recovery-trace.json`
+under the Harness data directory, outside Git. They retain the last 200 events,
+with timestamps, serving revision, host, correlation ID, durations, counts and
+outcomes; they omit tokens and transcript content. Read them through the
+authenticated `POST /api/cluster/recovery` API with
+`{"host":"<host-id>","action":"traces"}` rather than accessing protected data
+files. Browser `recovery.visible` events identify loading, results, empty,
+success and error states; a server commit alone does not prove screen delivery.
+Reproduce by creating a local project, joining another host and checking its
+project/tab entries; the distributed E2E workflow also restores a missing
+project from archives and exercises a failed recovery request.
+
 Coding sessions are instructed to include tracing for future debugging: what the
 user did, what the app showed, and what happened behind the scenes. Logs are for
 the coding assistant to read, not extra UI for the user. They should be bounded,

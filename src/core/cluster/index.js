@@ -60,6 +60,15 @@ export async function createCluster(dir, { port, request = fetch, onChange = () 
   const sessionWrites = new Map();
   const service = {
     replica, self,
+    async readProjects() {
+      if (replica.role === 'leader') {
+        if (!replica.writable()) throw new Error('Coordinator lost quorum.');
+        return JSON.parse(replica.state.values['settings:apps.json'] || '{"apps":[]}').apps;
+      }
+      const leader = service.leader();
+      if (!leader) throw new Error('Waiting for the coordinator.');
+      return (await rpc(leader.url, 'read-projects', {})).apps;
+    },
     async readSession(id, metadata = false) {
       if (replica.role === 'leader') {
         if (!replica.writable()) throw new Error('Coordinator lost quorum.');
@@ -112,6 +121,11 @@ export async function createCluster(dir, { port, request = fetch, onChange = () 
       const host = replica.members().find(n => n.id === id);
       if (!host) throw new Error('Unknown computer');
       return rpc(host.url, 'worker-help', request);
+    },
+    async hostRecovery(id, request) {
+      const host = replica.members().find(n => n.id === id);
+      if (!host) throw new Error('Unknown computer');
+      return rpc(host.url, 'worker-recovery', request);
     },
     async hostModels(id) {
       const host = replica.members().find(n => n.id === id);
@@ -186,7 +200,7 @@ export async function createCluster(dir, { port, request = fetch, onChange = () 
         await service.command({ type: 'viewer-v2', value, version: 2, at: now });
       return { ...service.status(), ticket: service.ticket() };
     },
-    async join({ url, token, ownUrl }, sessions = [], values = {}) {
+    async join({ url, token, ownUrl }, sessions = [], values = {}, apps = []) {
       if (joinPending || service.shared()) throw new Error('This machine is already joined or joining.');
       if (!token?.trim()) throw new Error('Enter the existing host’s access token.');
       const target = new URL(url);
@@ -197,20 +211,13 @@ export async function createCluster(dir, { port, request = fetch, onChange = () 
       joinPending = true;
       replica.stop();
       try {
-        const admitted = await rpc(target.origin, 'admit', { member: self }, token.trim());
+        const admitted = await rpc(target.origin, 'admit', { member: self, projectImportVersion: 1 }, token.trim());
+        if (admitted.projectImportVersion !== 1) throw new Error('Restart Harness on the existing host with the latest code before joining. Projects have not been imported.');
         // Preserve the old standalone history before adopting the cluster.
         await atomic(path.join(root, `before-join-${Date.now()}.json`), replica.exportState());
         await replica.importState(admitted.disk ? admitted : { disk: admitted, snapshot: null });
         await rpc(target.origin, 'activate', { member: self });
-        // Joining an existing installation imports its transcripts, retaining
-        // distinct IDs rather than overwriting an existing cluster session.
-        for (const [id, value] of Object.entries(values)) await rpc(target.origin, 'command', { type: 'value', id, value });
-        for (const session of sessions) {
-          if (replica.state.sessions[session.id] || replica.disk.log.some((e) => e.command.type === 'session' && e.command.id === session.id)) {
-            session.id += `-${self.id.slice(0, 8)}`;
-          }
-          await rpc(target.origin, 'command', { type: 'session', id: session.id, value: { ...session, ownerNode: self.id } });
-        }
+        await rpc(target.origin, 'command', { type: 'project-import', host: self.id, apps, sessions, values });
       } finally { joinPending = false; replica.start(); }
       return service.status();
     },
@@ -222,7 +229,7 @@ export async function createCluster(dir, { port, request = fetch, onChange = () 
       if (replica.members().some((n) => n.id === member.id || n.url === u.origin)) throw new Error('Machine already joined');
       // Admit as a learner. Activation waits for it to acknowledge the log
       // before a joint configuration can give it a vote.
-      return replica.exportState();
+      return { ...replica.exportState(), projectImportVersion: 1 };
     },
     async activate(member) {
       if (joinPending) throw new Error('A membership change is already running');

@@ -87,7 +87,100 @@ try {
     assert.equal(await (await fetch(`http://127.0.0.1:${port}`)).text(), 'grocery');
   } finally { listener.kill(); await listenerExit; }
   const a = await start('model-a'), b = await start('model-b');
+  const sneaker = await b.call('/api/apps', 'POST', { name: 'Sneaker game', dir: path.join(root, 'sneaker-game') });
+  await fs.writeFile(path.join(sneaker.dir, 'saved-game.txt'), 'unsaved-to-git game');
+  const existingProject = await a.call('/api/apps', 'POST', { name: 'Existing project', dir: path.join(root, 'existing-project') });
+  assert.equal((await a.request('/api/cluster/admit', 'POST', { member: b.status.hosts[0] })).status, 409,
+    'an older joining host must update before its registry can be lost');
+  const colliding = await b.call('/api/apps', 'POST', { name: 'Different project with same ID', dir: path.join(root, 'collision-project') });
+  const registryPath = path.join(b.dir, 'apps.json');
+  const registry = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+  registry.apps.find(p => p.id === colliding.id).id = existingProject.id;
+  await fs.writeFile(registryPath, JSON.stringify(registry));
+  const collisionSessionPath = path.join(b.dir, 'sessions', colliding.sessionId + '.json');
+  const collisionSession = JSON.parse(await fs.readFile(collisionSessionPath, 'utf8'));
+  collisionSession.appId = existingProject.id;
+  await fs.writeFile(collisionSessionPath, JSON.stringify(collisionSession));
   await b.call('/api/cluster/join', 'POST', { url: a.status.hosts[0].url, ownUrl: b.status.hosts[0].url, token: 'execution-test' });
+  // Host-local diagnostics: served browser actions correlate with real HTTP work.
+  const historySource = await (await a.request('/diagnostics.js')).text();
+  const listeners = {}, documentListeners = {};
+  const browserWindow = { fetch: (route, opts = {}) => fetch(a.status.hosts[0].url + route, { ...opts,
+      headers: { ...Object.fromEntries(new Headers(opts.headers)), 'x-harness-token':'execution-test' } }),
+    addEventListener: (event, fn) => { listeners[event] = fn; } };
+  const browserUi = vm.createContext({ window: browserWindow, crypto: {randomUUID: () => 'browser-e2e'},
+    localStorage: { getItem() {}, setItem() {} }, navigator: {userAgent:'iPhone'}, Headers, Request, performance, Date,
+    innerWidth:390, innerHeight:844, setInterval: fn => { listeners.flush = fn; },
+    document: { addEventListener: (event, fn) => { documentListeners[event] = fn; }, visibilityState:'visible' } });
+  vm.runInContext(historySource, browserUi);
+  documentListeners.click({ target: { closest: () => ({id:'h-history'}) } });
+  browserWindow.harnessTrace('visible', {screen:'history',outcome:'shown'});
+  await browserWindow.fetch('/api/jev/evaluate', {method:'POST',body:'{}'});
+  browserWindow.harnessTrace('visible', {screen:'banner',outcome:'error'});
+  await listeners.flush();
+  await a.call('/api/diagnostics', 'POST', {action:'append',events:[{event:'action',control:'send',
+    correlationId:'redaction-e2e', text:'PRIVATE-CONTENT', token:'SECRET', url:'https://private.example'}]});
+  let history = await a.call('/api/diagnostics?action=events');
+  assert.equal(history.maxMB, 2048, 'new hosts default to a 2 GiB history budget');
+  assert.ok(history.events.some(e => e.event === 'browser.action' && e.device === 'phone'));
+  assert.ok(history.events.some(e => e.event === 'browser.visible' && e.outcome === 'error'));
+  assert.ok(history.events.some(e => e.event === 'browser.request' && e.status === 400));
+  assert.ok(history.events.some(e => e.event === 'request.finished' && e.status === 400 && e.correlationId === 'browser-e2e'));
+  assert.equal((await fetch(a.status.hosts[0].url + '/api/diagnostics')).status,401);
+  assert.doesNotMatch(JSON.stringify(history), /PRIVATE-CONTENT|SECRET|private.example/);
+  assert.ok(history.freeBytes > 0);
+  assert.equal((await a.request('/api/diagnostics', 'POST', {action:'settings',enabled:true,maxMB:99999,days:14})).status,400);
+  await a.call('/api/diagnostics', 'POST', {action:'settings',enabled:true,maxMB:4,days:1});
+  // Old/oversized segments rotate without touching another host's history.
+  await fs.writeFile(path.join(a.dir,'diagnostics','000-old.jsonl'), 'x'.repeat(5 * 1048576));
+  history = await a.call('/api/diagnostics');
+  assert.ok(history.bytes <= 4 * 1048576);
+  await b.call('/api/diagnostics', 'POST', {action:'append',events:[{event:'action',correlationId:'only-b'}]});
+  const allHistory = await a.call('/api/diagnostics?action=all');
+  assert.equal(allHistory.histories.length,2);
+  assert.ok(allHistory.histories.find(h => h.host === b.status.self).events.some(e => e.correlationId === 'only-b'));
+  assert.ok(!(await a.call('/api/diagnostics?action=events')).events.some(e => e.correlationId === 'only-b'));
+  await a.call('/api/diagnostics', 'POST', {action:'settings',enabled:false,maxMB:4,days:1});
+  await a.call('/api/diagnostics', 'POST', {action:'clear'});
+  await a.call('/api/diagnostics', 'POST', {action:'append',events:[{event:'action',control:'send'}]});
+  assert.equal((await a.call('/api/diagnostics?action=events')).events.length,0);
+  assert.ok((await a.call('/api/diagnostics?host='+b.status.self+'&action=events')).events.length > 0);
+  await a.call('/api/diagnostics', 'POST', {action:'settings',enabled:true,maxMB:128,days:14});
+  // A failed trace write must not fail the project API.
+  await fs.rename(path.join(a.dir,'diagnostics'),path.join(a.dir,'diagnostics-saved'));
+  await fs.writeFile(path.join(a.dir,'diagnostics'),'unwritable directory fixture');
+  await a.call('/api/diagnostics', 'POST', {action:'append',events:[{event:'action'}]});
+  assert.ok((await a.call('/api/state')).apps.length);
+  await fs.unlink(path.join(a.dir,'diagnostics'));
+  await fs.rename(path.join(a.dir,'diagnostics-saved'),path.join(a.dir,'diagnostics'));
+  assert.ok((await a.call('/api/diagnostics')).failed > 0);
+
+  const joined = await a.call('/api/apps');
+  assert.ok(joined.apps.some(p => p.id === existingProject.id));
+  const importedId = `${existingProject.id}-${b.status.self}`;
+  assert.equal(joined.apps.find(p => p.id === existingProject.id).dir, existingProject.dir);
+  assert.equal(joined.apps.find(p => p.id === importedId).dir, colliding.dir);
+  assert.equal((await a.call('/api/state')).sessions.find(s => s.id === colliding.sessionId).appId, importedId);
+  assert.equal(joined.apps.find(p => p.id === sneaker.id).ownerNode, b.status.self);
+  assert.deepEqual(joined.apps.find(p => p.id === sneaker.id).machines.filter(m => m.placed).map(m => m.id), [b.status.self]);
+  assert.equal((await a.call('/api/state')).sessions.find(s => s.id === sneaker.sessionId).appId, sneaker.id);
+  assert.equal(await fs.readFile(path.join(sneaker.dir, 'saved-game.txt'), 'utf8'), 'unsaved-to-git game');
+
+  // Simulate the missing registry and tabs left by the old join/conflict path.
+  // Original standalone sessions and the pre-join archive still exist on B.
+  await a.call(`/api/apps/${sneaker.id}?sessions=1`, 'DELETE');
+  const recover = body => a.call('/api/cluster/recovery', 'POST', { host: b.status.self, ...body });
+  const candidates = await recover({ action: 'list' });
+  assert.equal(candidates.projects.find(p => p.id === sneaker.id).tabs, 1);
+  assert.equal(JSON.stringify(candidates).includes('execution-test'), false);
+  await recover({ action: 'restore', appId: sneaker.id, correlationId: 'recovery-e2e' });
+  assert.ok((await a.call('/api/apps')).apps.some(p => p.id === sneaker.id));
+  assert.equal((await a.call('/api/state')).sessions.find(s => s.id === sneaker.sessionId).appId, sneaker.id);
+  assert.equal(await fs.readFile(path.join(sneaker.dir, 'saved-game.txt'), 'utf8'), 'unsaved-to-git game');
+  assert.equal((await a.request('/api/cluster/recovery', 'POST', { host: b.status.self, action: 'restore', appId: 'missing', correlationId: 'recovery-error-e2e' })).status, 400);
+  const recoveryTraces = (await recover({ action: 'traces' })).events;
+  assert.ok(recoveryTraces.some(e => e.event === 'recovery.restored' && e.correlationId === 'recovery-e2e'));
+  assert.ok(recoveryTraces.some(e => e.event === 'recovery.error' && e.correlationId === 'recovery-error-e2e'));
   assert.deepEqual(await a.call('/api/jev'), { configured: false });
   assert.equal((await a.request('/api/jev/evaluate', 'POST', {})).status, 400);
   assert.equal((await b.request('/api/jev', 'PUT', {apiKey: ''})).status, 400);
@@ -110,6 +203,69 @@ try {
   }
   // Exercise the served frontend with reordered status replies and tab switches.
   const frontend = await (await a.request('/app.js')).text();
+  const historyElements = new Map();
+  let historyHtml = '', historyError = '';
+  const historyUi = vm.createContext({ window:{}, state:{machines:{hosts:[{id:a.status.self,name:'model-a'},{id:b.status.self,name:'model-b'}]}},
+    sheetView:'', esc:String, encodeURIComponent, Number,
+    nativeFetch: (route,opts={}) => a.request(route,opts.method || 'GET',opts.body ? JSON.parse(opts.body) : undefined),
+    $: id => { if(!historyElements.has(id)) historyElements.set(id,{}); return historyElements.get(id); },
+    openSheet(html,view) { historyUi.sheetView = view; historyHtml = html; },
+    settingsSheet() {}, showBanner: text => {historyError = text;} });
+  vm.runInContext(frontend.slice(frontend.indexOf('let historyRequest ='),frontend.indexOf('async function jevSheet()')),historyUi);
+  await historyUi.historySheet();
+  assert.match(historyHtml,/Free disk/);
+  Object.assign(historyUi.$('history-enabled'),{value:'on'});
+  historyUi.$('history-mb').value = '1';
+  historyUi.$('history-days').value = '14';
+  await historyElements.get('history-save').onclick();
+  assert.match(historyError,/4–2048/);
+  historyUi.$('history-mb').value = '128';
+  await historyElements.get('history-save').onclick();
+  assert.equal(historyElements.get('history-result').textContent,'History settings saved.');
+  await historyElements.get('history-clear').onclick();
+  assert.match(historyElements.get('history-result').textContent,/History cleared/);
+  // Drive the served recovery screen against the real API and a conflict archive.
+  const archived = { id: 'archived-game', name: 'Archived game', dir: path.join(root, 'archived-game'), ownerNode: b.status.self };
+  await fs.mkdir(archived.dir);
+  await fs.writeFile(path.join(b.dir, 'cluster', 'conflict-e2e.json'), JSON.stringify({ base: 0, commit: 2, log: [
+    { command: { type: 'value', id: 'settings:apps.json', value: JSON.stringify({ apps: [archived] }) } },
+    { command: { type: 'session', id: 'archived-tab', value: { id: 'archived-tab', appId: archived.id, ownerNode: b.status.self,
+      projectDir: archived.dir, name: 'Saved tab', events: [], updatedAt: 1 } } },
+  ], secret: 'must-not-appear-in-recovery' }));
+  const recoveryButtons = [];
+  let recoveryHtml = '', recoveryBanner = '';
+  const recoveryUi = vm.createContext({ crypto: { randomUUID: () => 'recovery-ui-e2e' },
+    state: { machines: { hosts: [{ id: b.status.self, name: 'model-b', member: true }] } },
+    sheetView: '', esc: String,
+    api: (route, opts) => a.call(route, opts.method, JSON.parse(opts.body)),
+    refreshState: () => a.call('/api/state'), appsSheet() {}, showBanner: text => { recoveryBanner = text; },
+    $: id => id === 'sheet' ? { querySelectorAll: () => recoveryButtons } : {},
+    openSheet(html, view) {
+      recoveryUi.sheetView = view; recoveryHtml = html;
+      recoveryButtons.splice(0, recoveryButtons.length, ...[...html.matchAll(/data-recover="(\d+)"/g)].map(m => ({ dataset: { recover: m[1] } })));
+    },
+  });
+  vm.runInContext(frontend.slice(frontend.indexOf('async function recoverProjectsSheet('), frontend.indexOf('async function runApp(')), recoveryUi);
+  await recoveryUi.recoverProjectsSheet();
+  assert.match(recoveryHtml, /Archived game/);
+  assert.doesNotMatch(recoveryHtml, /must-not-appear/);
+  assert.equal(recoveryButtons.length, 1);
+  const restoreButton = recoveryButtons[0];
+  await restoreButton.onclick();
+  assert.equal(restoreButton.textContent, 'restored');
+  assert.ok((await a.call('/api/state')).sessions.some(s => s.id === 'archived-tab'));
+  // A stale second click is rejected and visibly reported without replacing data.
+  await restoreButton.onclick();
+  assert.match(recoveryBanner, /No missing project/);
+  await recoveryUi.recoverProjectsSheet();
+  assert.match(recoveryHtml, /No missing projects found/);
+  let visibleStates = [];
+  for (let i = 0; i < 30; i++) {
+    visibleStates = (await recover({ action: 'traces' })).events.filter(e => e.correlationId === 'recovery-ui-e2e' && e.event === 'recovery.visible').map(e => e.visible);
+    if (['loading', 'results', 'success', 'error', 'empty'].every(s => visibleStates.includes(s))) break;
+    await pause();
+  }
+  for (const expected of ['loading', 'results', 'success', 'error', 'empty']) assert.ok(visibleStates.includes(expected), expected);
   const classes = new Set(), pendingStatus = [];
   const pushButton = { classList: { toggle(name, on) { on ? classes.add(name) : classes.delete(name); } } };
   const ui = vm.createContext({ state: { session: { id: 'first' } },
@@ -391,6 +547,36 @@ try {
   const unavailable = await a.request(`/api/execution-models?app=__harness&host=${b.status.self}`);
   assert.ok(!unavailable.ok, 'an offline computer never falls back to the serving computer’s models');
   assert.equal((await unavailable.json()).models, undefined);
+  const offlineHistory = await a.call('/api/diagnostics?action=all');
+  assert.equal(offlineHistory.histories.find(h => h.host === b.status.self).unavailable, true);
+  assert.ok(offlineHistory.histories.find(h => h.host === a.status.self).events.length);
+  await a.call('/api/diagnostics', 'POST', {action:'settings',enabled:true,maxMB:16,days:7});
+  // A compacted replica with no tail still owns recoverable history.
+  a.child.kill('SIGTERM'); await a.closed;
+  const raftFile = path.join(a.dir, 'cluster', 'replica.json');
+  const raftDisk = JSON.parse(await fs.readFile(raftFile, 'utf8'));
+  const members = [a.status.hosts[0], b.status.hosts[0]];
+  const archivedState = {sessions:{saved:{id:'saved',name:'Preserve me'}}, values:{}, viewers:{},
+    history:Object.fromEntries(members.map(h => [h.id,h])), preferred:a.status.self};
+  const boundary = 50000, oldTerm = raftDisk.term + 10;
+  Object.assign(raftDisk, {base:boundary,baseTerm:oldTerm,baseId:'old-boundary',commit:boundary,log:[],term:oldTerm});
+  await fs.writeFile(raftFile,JSON.stringify(raftDisk));
+  await fs.writeFile(path.join(a.dir,'cluster','snapshot.json'),JSON.stringify({index:boundary,term:oldTerm,id:'old-boundary',configuration:{members},state:archivedState}));
+  await a.restart();
+  assert.equal((await a.call('/api/diagnostics')).maxMB,16,'history settings survive restart');
+  const snapshotResponse = await fetch(a.status.hosts[0].url + '/api/cluster/rpc', {method:'POST',
+    headers:{'Content-Type':'application/json','x-cluster-key':raftDisk.secret},
+    body:JSON.stringify({kind:'snapshot',from:b.status.self,term:oldTerm+10,index:boundary+1,snapTerm:oldTerm+10,snapId:'replacement',
+      configuration:{members},state:{...archivedState,sessions:{}}})});
+  assert.equal(snapshotResponse.status,200);
+  const archives = (await fs.readdir(path.join(a.dir,'cluster'))).filter(n => n.startsWith('conflict-') && n.endsWith('-snapshot.json'));
+  let preserved = false;
+  for(const name of archives) {
+    const saved = JSON.parse(await fs.readFile(path.join(a.dir,'cluster',name),'utf8'));
+    if(saved.state.sessions.saved?.name === 'Preserve me') preserved = true;
+  }
+  assert.ok(preserved,'snapshot-only history must be archived before replacement');
+
   console.log('PASS follower-owned turns, local model inventories, SSE proxy, busy assignment guard, single-host eligibility and commands from another computer');
 } finally {
   release?.();

@@ -134,6 +134,7 @@ const HARNESS_GUIDE = [
   "- Tap targets are at least 44px. Text stays readable at phone width; nothing may cause horizontal scroll.",
   "",
   "Working discipline:",
+  "- For Harness experience or reliability reviews, read authenticated GET /api/diagnostics?action=all on the local Harness origin using the activity command authentication. This combines recent metadata from reachable hosts without replication. Use action=events&host=<host-id>&before=<ISO-time> to page older history; never read the protected data directory. Missing events or an unreachable host are missing evidence, not proof of user behavior.",
   "- Read the neighbouring code before adding to it; match its style, naming and structure.",
   "- Run npm test before you finish and report the result. Extend the relevant E2E workflow for behavior changes; do not add unit or source-inspection tests.",
   "- The running server holds the OLD code until it is restarted, so your file edits are NOT live until the harness restarts. After changing server or UI code, tell the user plainly that a restart is needed (there is a Restart control on the Harness app), and never claim a change works when you could not load it.",

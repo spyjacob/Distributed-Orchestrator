@@ -14,6 +14,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { importProjects } from './project-import.js';
 
 export const quorum = (n) => n < 3 ? 1 : Math.floor(n / 2) + 1;
 const majority = (n) => Math.floor(n / 2) + 1;
@@ -44,8 +45,9 @@ function blankState(initial) {
   for (const node of initial) state.history[node.id] = node;
   return state;
 }
-function applyCommand(state, c) {
-  if (c.type === 'session') {
+export function applyCommand(state, c) {
+  if (c.type === 'project-import') importProjects(state, c);
+  else if (c.type === 'session') {
     if (c.value === null) delete state.sessions[c.id]; else state.sessions[c.id] = c.value;
   } else if (c.type === 'viewer' || c.type === 'viewer-v2') {
     if (c.version === 2) {
@@ -155,10 +157,13 @@ export class Replica {
     if (index <= base) return;
     const tail = this.disk.log.slice(0, index - base);
     if (!force && tail.length < COMPACT_ENTRIES && size(tail) < COMPACT_BYTES) return;
-    if (this.applied !== index) this.apply();
-    const snapshot = { index, term: this.termAt(index), id: this.idAt(index), configuration: this.configurationAt(index), state: this.state };
+    // A connected follower can lag behind commit. A snapshot must describe
+    // exactly its index, never include later commands (especially deletions).
+    const state = this.snapshot ? copy(this.snapshot.state) : blankState(this.disk.initial);
+    for (let i = base + 1; i <= index; i++) applyCommand(state, this.entry(i).command);
+    const snapshot = { index, term: this.termAt(index), id: this.idAt(index), configuration: this.configurationAt(index), state };
     await atomic(this.snapshotFile, snapshot);
-    this.snapshot = { ...snapshot, state: copy(this.state) };
+    this.snapshot = { ...snapshot, state: copy(state) };
     this.disk.log = this.disk.log.slice(index - base);
     Object.assign(this.disk, { base: index, baseTerm: snapshot.term, baseId: snapshot.id });
     await this.persist();
@@ -291,7 +296,7 @@ export class Replica {
     }
     // Usually this host was simply offline and behind. Committed entries the
     // snapshot might not contain are still kept; beyond it they are a conflict.
-    if (this.disk.commit > this.disk.base) await this.archive(this.disk.commit > message.index);
+    if (this.snapshot || this.disk.commit > this.disk.base) await this.archive(this.disk.commit >= message.index);
     const snapshot = { index: message.index, term: message.snapTerm, id: message.snapId, configuration: message.configuration, state: message.state };
     await atomic(this.snapshotFile, snapshot);
     this.snapshot = snapshot;

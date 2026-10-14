@@ -153,8 +153,10 @@ function openSheet(html, view = null) {
   sheetView = view;
   $('sheet').innerHTML = html;
   $('sheet-back').hidden = false;
+  window.harnessTrace?.('visible', { screen: view || html.match(/\bid="([a-z][a-z-]{1,50})"/)?.[1] || 'sheet', outcome: 'shown' });
 }
 function closeSheet() {
+  window.harnessTrace?.('visible', { screen: 'chat', outcome: 'shown' });
   sheetView = null;
   $('sheet-back').hidden = true;
   $('sheet').innerHTML = '';
@@ -525,6 +527,7 @@ function turnHtml(turn, i, running, number, isLast) {
 }
 
 function drawTranscript() {
+  window.harnessTrace?.('visible', { screen: 'transcript', outcome: state.session?.events?.length ? 'content' : 'empty' });
   const s = cur().session;
   const el = $('transcript');
   if (!s) {
@@ -593,6 +596,7 @@ async function openSession(id) {
     $('title-name').textContent = state.apps?.find((a) => a.id === meta.appId)?.name || 'Distributed Orchestrator';
     $('title-sub').textContent = `Model: ${state.models[meta.model]?.label || meta.model}`;
   }
+  window.harnessTrace?.('visible', { screen: 'transcript', outcome: 'loading' });
   $('transcript').innerHTML = '<div class="empty"><p class="dim">loading…</p></div>';
 
   let session;
@@ -787,6 +791,7 @@ function paintHeader() {
 }
 
 function showBanner(msg, warn = false) {
+  window.harnessTrace?.('visible', { screen: 'banner', outcome: msg ? 'error' : 'cleared' });
   const b = $('banner');
   b.textContent = msg;
   b.hidden = !msg;
@@ -914,6 +919,7 @@ function listen(tab, id) {
     if (p.kind === 'error' && active) showBanner(p.error);
 
     if (p.kind === 'done') {
+      if (active) window.harnessTrace?.('visible', {screen:'transcript',outcome:'turn-ended'});
       clearLive(tab);
       setRunning(false, null, null, tab);
       t.startedAt = null;
@@ -1286,10 +1292,12 @@ async function settingsSheet() {
       <button class="rowlink" id="h-jev"><span>Jev · TypeSafe</span><span class="chev">›</span></button>
       <button class="rowlink" id="h-voice"><span>Voice setup</span><span class="chev">›</span></button>
       <button class="rowlink" id="h-notify"><span>Notifications</span><span class="chev">›</span></button>
+      <button class="rowlink" id="h-history"><span>Usage history · diagnostics</span><span class="chev">›</span></button>
       <button class="rowlink" id="h-version"><span id="h-version-label">Restart and updates</span><span class="chev">›</span></button>
     </div>
     <div class="actions"><button class="primary" id="s-close">done</button></div>`);
 
+  $('h-history').onclick = () => historySheet();
   $('h-github').onclick = githubSheet;
   $('h-machines').onclick = machinesSheet;
   $('h-network').onclick = networkSheet;
@@ -1300,6 +1308,64 @@ async function settingsSheet() {
 
   $('s-close').onclick = closeSheet;
   $('h-version').onclick = harnessVersionSheet;
+}
+
+let historyRequest = 0;
+async function historySheet(host = '') {
+  const ticket = ++historyRequest;
+  const request = async (action, body) => {
+    const url = '/api/diagnostics?host=' + encodeURIComponent(host) + '&action=' + action;
+    const r = await nativeFetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+    const value = await r.json();
+    if (!r.ok) throw Error(value.error || 'History unavailable');
+    return value;
+  };
+  openSheet('<h2>Usage history</h2><p class="dim">Loading this computer’s history…</p>', 'history');
+  try {
+    const data = await request('status');
+    if (sheetView !== 'history' || ticket !== historyRequest) return;
+    const size = n => n == null ? 'unknown' : (n / 1048576).toFixed(1) + ' MB';
+    openSheet(`<h2>Usage history</h2>
+      <label>Computer</label><select id="history-host">${(state.machines?.hosts || [{id:data.host,name:'This computer'}]).map(h => `<option value="${esc(h.id)}" ${h.id === data.host ? 'selected' : ''}>${esc(h.name)}</option>`).join('')}</select>
+      <p>History: ${size(data.bytes)} in ${data.files} files. Free disk: ${size(data.freeBytes)}.</p>
+      <p class="dim">Actions, screens, timings and failures stay on this computer. No messages, typing, screenshots or credentials. Offline computers retain their own history.</p>
+      <label>Record usage history</label><select id="history-enabled"><option value="on" ${data.enabled ? 'selected' : ''}>On</option><option value="off" ${!data.enabled ? 'selected' : ''}>Off</option></select>
+      <label>Maximum MB (4–2048)</label><input id="history-mb" type="number" min="4" max="2048" value="${data.maxMB}">
+      <label>Retention days (1–90)</label><input id="history-days" type="number" min="1" max="90" value="${data.days}">
+      <p class="dim">Effective disk limit: ${size(data.effectiveMaxBytes)}. Dropped events: ${data.dropped}; write failures: ${data.failed}.</p>
+      <div class="actions"><button class="primary" id="history-save">save</button><button class="ghost" id="history-read">recent history</button></div>
+      <div class="actions"><button class="danger" id="history-clear">clear this history</button><button class="ghost" id="history-back">settings</button></div>
+      <p id="history-result" class="dim"></p>`, 'history');
+    $('history-host').onchange = e => historySheet(e.target.value);
+    $('history-back').onclick = settingsSheet;
+    const result = async fn => {
+      try { await fn(); } catch(e) { showBanner(e.message); }
+    };
+    $('history-save').onclick = () => result(async () => {
+      await request('settings', { action:'settings', enabled:$('history-enabled').value === 'on', maxMB:Number($('history-mb').value), days:Number($('history-days').value) });
+      if (sheetView !== 'history' || ticket !== historyRequest) return;
+      window.harnessTrace?.('visible', {screen:'history',outcome:'saved'});
+      $('history-result').textContent = 'History settings saved.';
+    });
+    $('history-clear').onclick = () => result(async () => {
+      await request('clear', {action:'clear'});
+      if (sheetView !== 'history' || ticket !== historyRequest) return;
+      await historySheet(host);
+      window.harnessTrace?.('visible', {screen:'history',outcome:'cleared'});
+      $('history-result').textContent = 'History cleared. New activity will be recorded if enabled.';
+    });
+    $('history-read').onclick = () => result(async () => {
+      const data = await request('events');
+      const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+      const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'harness-history.json'; link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+      $('history-result').textContent = 'Downloaded up to 1,000 recent events.';
+    });
+  } catch (e) {
+    if (sheetView !== 'history' || ticket !== historyRequest) return;
+    openSheet(`<h2>Usage history</h2><p class="dim">${esc(e.message)}</p><button class="ghost" id="history-back">settings</button>`, 'history');
+    $('history-back').onclick = settingsSheet;
+  }
 }
 
 async function jevSheet() {
@@ -2635,6 +2701,8 @@ function renderAppsSheet(d) {
     <div class="actions">
       <button class="primary" id="app-new">new project</button>
       <button class="ghost" id="sess-new">new session</button>
+    </div><div class="actions">
+      <button class="ghost" id="project-recover">recover projects</button>
     </div>`, 'apps');
   $('sheet').querySelectorAll('[data-project-group]').forEach((el) => {
     el.ontoggle = () => {
@@ -2648,6 +2716,7 @@ function renderAppsSheet(d) {
   showPeerSessions();
   $('app-new').onclick = () => appEditSheet(null);
   $('sess-new').onclick = () => { draft = {}; newSheet(); };
+  $('project-recover').onclick = () => recoverProjectsSheet();
   $('sheet').querySelectorAll('[data-app-toggle]').forEach((el) => {
     el.onclick = (e) => {
       if (e.target.closest('.app-actions') || e.target.closest('a')) return;  // buttons/links are their own
@@ -2701,6 +2770,43 @@ function renderAppsSheet(d) {
 }
 
 /** Start or stop an app, with clear feedback. Shared by the app card. */
+async function recoverProjectsSheet() {
+  const correlationId = crypto.randomUUID();
+  const call = body => api('/api/cluster/recovery', { method: 'POST', body: JSON.stringify({ correlationId, ...body }) });
+  const visible = (host, value) => call({ host, action: 'visible', visible: value }).catch(() => {});
+  openSheet('<h2>Recover projects</h2><p class="dim">Searching saved histories on your computers…</p>', 'recovery');
+  const hosts = (state.machines?.hosts || []).filter(h => h.member);
+  const results = await Promise.all(hosts.map(async host => {
+    visible(host.id, 'loading');
+    try { return { host, ...await call({ host: host.id, action: 'list' }) }; }
+    catch (error) { return { host, error: error.message, projects: [] }; }
+  }));
+  if (sheetView !== 'recovery') return;
+  const choices = results.flatMap(r => r.projects.map(project => ({ ...project, host: r.host })));
+  openSheet(`<h2>Recover projects</h2><p class="dim">Restore missing project records and saved tabs. Files stay on their original computer. Projects you previously deleted may also appear.</p>
+    ${results.filter(r => r.error || r.unreadable).map(r => `<p class="dim">${esc(r.host.name)}: ${esc(r.error || `${r.unreadable} saved histories could not be read.`)}</p>`).join('')}
+    ${choices.length ? choices.map((p, i) => `<div class="item"><div class="grow"><div class="t">${esc(p.name)}</div><div class="s">${esc(p.host.name)} · ${p.tabs} saved tabs${p.inferred ? ' · launch settings unavailable' : ''}</div></div><button class="ghost" data-recover="${i}">restore</button></div>`).join('') : '<p class="dim">No missing projects found in the histories that could be read.</p>'}
+    <div class="actions"><button class="ghost" id="recovery-back">back to projects</button></div>`, 'recovery');
+  results.forEach(r => visible(r.host.id, r.error ? 'error' : r.projects.length ? 'results' : 'empty'));
+  $('recovery-back').onclick = () => appsSheet();
+  $('sheet').querySelectorAll('[data-recover]').forEach(button => {
+    button.onclick = async () => {
+      const project = choices[Number(button.dataset.recover)];
+      button.disabled = true; button.textContent = 'restoring…';
+      visible(project.host.id, 'loading');
+      try {
+        await call({ host: project.host.id, action: 'restore', appId: project.id });
+        await refreshState();
+        button.textContent = 'restored';
+        if (sheetView === 'recovery') visible(project.host.id, 'success');
+      } catch (error) {
+        button.disabled = false; button.textContent = 'restore';
+        showBanner(error.message); visible(project.host.id, 'error');
+      }
+    };
+  });
+}
+
 async function runApp(app, el) {
   if (!app.running && !app.start?.trim()) {
     showBanner(`${app.name} has no start command yet — add one here, then tap ▶`, true);

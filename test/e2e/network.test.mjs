@@ -34,6 +34,7 @@ try {
     catch { await pause(100); }
   }
   assert.equal(network.connected, false);
+  assert.equal((await request('/api/diagnostics')).status, 200, 'local diagnostics survive Tailscale disconnection');
   assert.equal((await request('/')).status, 200, 'the blocking screen is still served');
   const blocked = await request('/api/sessions', 'POST');
   assert.equal(blocked.status, 503);
