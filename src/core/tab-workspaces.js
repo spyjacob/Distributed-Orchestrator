@@ -217,6 +217,74 @@ async function fetchTarget(repo, target) {
   }
 }
 
+async function checkWithRepair(ws, log, base, options) {
+  const check = async () => {
+    const head = await git(ws.dir, 'rev-parse', 'HEAD');
+    await validate(ws.dir, log, base, options.signal);
+    if (await git(ws.dir, 'rev-parse', 'HEAD') !== head) throw Error('Tab changed during checks; retry integration.');
+  };
+  try { await check(); }
+  catch (error) {
+    if (!options.repair || !error.message.startsWith('Integration check failed')) throw error;
+    const before = await git(ws.dir, 'rev-parse', 'HEAD');
+    await options.repair({ target: base, reason: 'checks-failed', conflicts: '', log });
+    options.signal?.throwIfAborted();
+    if (await git(ws.dir, 'symbolic-ref', '--short', 'HEAD') !== ws.branch || !await clean(ws.dir))
+      throw Error('Check repair left unsaved work; publication stopped.');
+    await git(ws.dir, 'merge-base', '--is-ancestor', before, 'HEAD');
+    const alteredChecks = await git(ws.dir, 'diff', '--name-only', before, 'HEAD', '--', 'package.json', '.harness-integration.json', 'test', 'tests');
+    if (alteredChecks) throw Error('Automatic repair changed check definitions. Work is saved, but review is required before publishing.');
+    await check();
+  }
+}
+
+async function mergeForIntegration(ws, target, options) {
+  try { await git(ws.dir, 'merge', '--no-edit', target); }
+  catch (error) {
+    const conflicts = await git(ws.dir, 'diff', '--name-only', '--diff-filter=U');
+    if (!conflicts || !options.repair) {
+      await git(ws.dir, 'merge', '--abort').catch(() => {});
+      throw error;
+    }
+    // Abort before repair: a failed/cancelled assistant leaves saved work,
+    // rather than an unresolved index that prevents the next attempt.
+    await git(ws.dir, 'merge', '--abort');
+    const before = await git(ws.dir, 'rev-parse', 'HEAD');
+    await options.repair({ target, reason: 'merge-conflict', conflicts });
+    await git(ws.dir, 'merge-base', '--is-ancestor', before, 'HEAD');
+    options.signal?.throwIfAborted();
+    if (await git(ws.dir, 'symbolic-ref', '--short', 'HEAD') !== ws.branch || !await clean(ws.dir))
+      throw Error('Merge repair left uncommitted work. Work is preserved; publication stopped.');
+    await git(ws.dir, 'merge-base', '--is-ancestor', target, 'HEAD');
+  }
+}
+
+export async function mergeTab(session, options = {}) {
+  const ws = session.tabWorkspace;
+  if (!ws) throw Error('Start a coding turn before merging this tab.');
+  const repo = await repository(session.projectDir);
+  if (repo.root !== ws.root || repo.common !== ws.common) throw Error('Project moved; reopen this tab.');
+  return locked(repo, async () => {
+    if (await git(ws.dir, 'symbolic-ref', '--short', 'HEAD') !== ws.branch) throw Error('Tab branch changed.');
+    const saved = await commitAndPush(ws.dir, { push: false });
+    if (!saved.ok) throw Error(saved.error || 'Could not save tab changes.');
+    const before = await git(ws.dir, 'rev-parse', 'HEAD');
+    const local = await git(repo.root, 'rev-parse', ws.target);
+    const remote = await git(repo.root, 'remote', 'get-url', 'origin').catch(() => '');
+    const target = remote ? await fetchTarget(repo, ws.target) : null;
+    await mergeForIntegration(ws, local, options);
+    if (target) await mergeForIntegration(ws, target, options);
+    let candidate = await git(ws.dir, 'rev-parse', 'HEAD');
+    const log = path.join(repo.common, 'harness-tabs', `${path.basename(ws.dir)}-checks.log`);
+    await options.onCheck?.(log);
+    await checkWithRepair(ws, log, before, options);
+    candidate = await git(ws.dir, 'rev-parse', 'HEAD');
+    options.signal?.throwIfAborted();
+    if (!await clean(ws.dir) || await git(ws.dir, 'rev-parse', 'HEAD') !== candidate) throw Error('Tab changed during checks. Retry merge.');
+    return { ok: true, merged: true, pushed: false, sha: candidate.slice(0, 8) };
+  });
+}
+
 async function integrateDistributed(repo, session, options) {
   const ws = session.tabWorkspace;
   const saved = await commitAndPush(ws.dir, { push: false });
@@ -228,13 +296,13 @@ async function integrateDistributed(repo, session, options) {
     const local = await git(repo.root, 'rev-parse', 'HEAD');
     const remote = await fetchTarget(repo, ws.target);
     try {
-      await git(ws.dir, 'merge', '--no-edit', local);
-      if (remote) await git(ws.dir, 'merge', '--no-edit', remote);
+      await mergeForIntegration(ws, local, options);
+      if (remote) await mergeForIntegration(ws, remote, options);
     } catch {
       await git(ws.dir, 'merge', '--abort').catch(() => {});
       throw new Error(`Changes from another computer conflict with this tab. Work is saved on ${ws.branch}; resolve the merge in this tab and retry integration.`);
     }
-    const candidate = await git(ws.dir, 'rev-parse', 'HEAD');
+    let candidate = await git(ws.dir, 'rev-parse', 'HEAD');
     if (candidate === remote) {
       await git(repo.root, 'merge', '--ff-only', remote);
       return { ok: true, skipped: 'no changes' };
@@ -242,7 +310,8 @@ async function integrateDistributed(repo, session, options) {
     const log = path.join(repo.common, 'harness-tabs', `${path.basename(ws.dir)}-checks.log`);
     session.integrationLog = log;
     await options.onCheck?.(log);
-    await validate(ws.dir, log, remote || local, options.signal);
+    await checkWithRepair(ws, log, remote || local, options);
+    candidate = await git(ws.dir, 'rev-parse', 'HEAD');
     options.signal?.throwIfAborted();
     if (await git(ws.dir, 'rev-parse', 'HEAD') !== candidate || !await clean(ws.dir)
       || await git(repo.root, 'rev-parse', 'HEAD') !== local || !await clean(repo.root))
@@ -295,16 +364,17 @@ export async function integrateTab(session, options = {}) {
       const publication = await publish(repo, ws.target, options);
       return { ok: true, integrated: true, sha: head.slice(0, 8), files: [], ...publication, commitUrl: await commitLink(repo, head, publication.pushed) };
     }
-    try { await git(ws.dir, 'merge', '--no-edit', head); }
+    try { await mergeForIntegration(ws, head, options); }
     catch {
       await git(ws.dir, 'merge', '--abort').catch(() => {});
       throw new Error(`Merge conflict. Work is saved on ${ws.branch}. In this tab, merge ${head}, resolve the conflicts, and retry. The shared project was not changed.`);
     }
-    const candidate = await git(ws.dir, 'rev-parse', 'HEAD');
+    let candidate = await git(ws.dir, 'rev-parse', 'HEAD');
     const log = path.join(repo.common, 'harness-tabs', `${path.basename(ws.dir)}-checks.log`);
     session.integrationLog = log;
     await options.onCheck?.(log);
-    await validate(ws.dir, log, head, options.signal);
+    await checkWithRepair(ws, log, head, options);
+    candidate = await git(ws.dir, 'rev-parse', 'HEAD');
     options.signal?.throwIfAborted();
     if (await git(ws.dir, 'rev-parse', 'HEAD') !== candidate || !await clean(ws.dir)) throw new Error('Tab changed during checks; retry integration.');
     if (await git(repo.root, 'rev-parse', 'HEAD') !== head || !await clean(repo.root)

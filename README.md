@@ -234,3 +234,16 @@ Push opens the current project chat and records a separate “Push changes” en
 check/publish progress, and a concise completion or failure reply. The receipt
 and commit link remain in the transcript after refreshing. No model request is
 needed to report publication; server progress is streamed to connected viewers.
+
+Push and Merge latest first use Git without a model. Merge latest is available in
+an isolated tab’s Push panel and brings in the target branch and fetched remote
+without publishing or updating the shared checkout. Push repeats those merges
+and runs checks before publication. Conflicts or failing configured checks can
+use the tab’s configured AI for at most two five-minute repair attempts per
+operation. Repairs stay in the tab and must preserve parent history, leave a
+clean branch, and pass checks. Check-failure repairs that change package.json,
+.harness-integration.json, test/, or tests/ require review instead of publishing.
+Network/authentication failures and missing check configuration are reported;
+no AI retries credentials or force-pushes. Stop cancels the operation. Repair
+progress appears in the current chat and integration.repair diagnostics (without
+message content). The server validates results; model claims alone are not proof.

@@ -44,7 +44,7 @@ import { loadSecrets, setSecret } from '../src/core/secrets.js';
 import { transcribe, transcriptionKey } from '../src/core/transcription.js';
 import * as attachments from '../src/core/attachments.js';
 import * as git from '../src/core/git.js';
-import { prepareTab, integrateTab, tabHasUnpublishedWork, pendingSummary, syncHarnessCheckout } from '../src/core/tab-workspaces.js';
+import { mergeTab, prepareTab, integrateTab, tabHasUnpublishedWork, pendingSummary, syncHarnessCheckout } from '../src/core/tab-workspaces.js';
 import { configureGithub, createGithubAuth } from '../src/core/github-auth.js';
 import { loadNotify, saveNotify, send as sendNotify, summarise, notificationSetupError } from '../src/core/notify.js';
 import * as store from '../src/core/store.js';
@@ -1540,11 +1540,12 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, res2);
     }
 
-    if (req.method === 'POST' && pathname === '/api/git/push') {
+    if (req.method === 'POST' && ['/api/git/push', '/api/git/merge'].includes(pathname)) {
+      const mergeOnly = pathname === '/api/git/merge';
       const { session: id, visibility = 'private' } = await readBody(req);
       if (!['private', 'public'].includes(visibility)) return json(res, 400, { error: 'Choose private or public visibility.' });
       const session = live.get(id) ?? (await store.load(id, { repair: false }));
-      if (running.has(id)) return json(res, 409, { error: 'Wait for the tab to finish before integrating.' });
+      if (running.has(id) || messageQueue.busy(id)) return json(res, 409, { error: 'Wait for the tab and queued messages to finish before integrating.' });
       if (!session.tabWorkspace) return json(res, 409, { error: 'Start an isolated coding turn before integrating changes.' });
       const last = [...session.events].reverse().find((e) => e.type === 'assistant');
       const startedAt = Date.now();
@@ -1561,12 +1562,31 @@ const server = http.createServer(async (req, res) => {
           await store.save(session);
           broadcast(id, { kind: 'event', event });
         };
-        await announce({ ...userEvent('Push changes'), operation: 'push' });
+        await announce({ ...userEvent(mergeOnly ? 'Merge latest changes into this tab' : 'Push changes'), operation: 'push' });
         broadcast(id, { kind: 'started', startedAt });
-        await announce(noteEvent('Push in progress · preparing changes.', { publication: 'pushing' }));
-        usageHistory?.record('push.started', { correlationId: requestId });
+        await announce(noteEvent(mergeOnly ? 'Merge in progress · fetching latest changes.' : 'Push in progress · preparing changes.', { publication: 'pushing' }));
+        usageHistory?.record(mergeOnly ? 'merge.started' : 'push.started', { correlationId: requestId });
         const app = session.appId ? (await apps.load(USER_DATA)).find(a => a.id === session.appId) : null;
-        const result = await integrateTab(session, {
+        let repairAttempts = 0;
+        const repair = async ({ target, reason, conflicts, log }) => {
+          if (repairAttempts++ >= 2) throw Error('Automatic repair limit reached; work is saved in this tab.');
+          const cfg = await loadConfig(USER_DATA);
+          await announce(noteEvent(`${reason === 'checks-failed' ? 'Checks failed' : 'Merge conflict'} · attempting AI repair in this tab.`, { publication: 'pushing' }));
+          usageHistory?.record('integration.repair', { correlationId: requestId, outcome: reason, count: repairAttempts });
+          const previousMode = session.mode;
+          session.mode = 'agent';
+          try {
+            await runTurn({ session, models: cfg.models,
+              userText: `${reason === 'checks-failed' ? `Repair the failing integration checks; read ${log}.` : 'Resolve the merge conflict.'} Integrate commit ${target} in this isolated tab worktree. Conflicted files: ${conflicts}.
+Preserve both branches' intended behavior. Merge and commit the resolution on the current tab branch. Do not push, switch branches, modify other worktrees, weaken tests, or alter integration checks. Run the existing checks. If intent is ambiguous or repair cannot be verified, leave work saved and explain the blocker.`,
+              attachments: [], signal: AbortSignal.any([running.get(id).controller.signal, AbortSignal.timeout(300000)]),
+              monitorsFile: monitorsPath(USER_DATA), activityCmd: '',
+              save: s => store.save(s), onEvent: event => broadcast(id, {kind:'event', event}),
+              onDelta: delta => broadcast(id, {kind:'delta', delta}) });
+          } finally { session.mode = previousMode; }
+        };
+        const result = await (mergeOnly ? mergeTab : integrateTab)(session, {
+          repair,
           distributed: (await sessionPlacement(session)).distributed,
           beforePublish: async () => {
             await requireConnection();
@@ -1580,36 +1600,36 @@ const server = http.createServer(async (req, res) => {
           signal: running.get(id).controller.signal,
           onCheck: async log => {
             await upsertMonitor(USER_DATA, { id: `integration-${id}`, label: 'Integration checks', kind: 'file', path: log, session: id });
-            await announce(noteEvent('Push in progress · running project checks.', { publication: 'pushing' }));
+            await announce(noteEvent(`${mergeOnly ? 'Merge' : 'Push'} in progress · running project checks.`, { publication: 'pushing' }));
           },
           push: true,
           model: session.model, servedModel: last?.servedModel,
         });
-        if (!result.ok || (!result.pushed && result.skipped !== 'no changes'))
+        if (!result.ok || (!mergeOnly && !result.pushed && result.skipped !== 'no changes'))
           throw new Error(result.error || result.reason || 'Publication did not finish.');
         if (app && !app.builtin && result.created) {
           const linked = await git.status(session.projectDir);
           if (linked.remote) await apps.update(USER_DATA, app.id, { repo: linked.remote });
         }
-        const note = noteEvent(result.pushed ? `Published to GitHub · ${result.sha}` : 'Already published; no new changes.', {
-          sha: result.sha, commitUrl: result.commitUrl, publication: 'published',
-          pushReceipt: { machine: cluster.self.name || cluster.self.id, status: result.pushed ? 'Published' : 'No changes', sha: result.sha, files: result.files?.length || 0 },
+        const note = noteEvent(mergeOnly ? 'Merged into this tab; nothing published.' : result.pushed ? `Published to GitHub · ${result.sha}` : 'Already published; no new changes.', {
+          sha: result.sha, commitUrl: result.commitUrl, publication: mergeOnly ? 'merged' : 'published',
+          pushReceipt: { machine: cluster.self.name || cluster.self.id, status: mergeOnly ? 'Merged locally' : result.pushed ? 'Published' : 'No changes', sha: result.sha, files: result.files?.length || 0 },
         });
         await announce(note);
-        await announce({ ...assistantEvent({ text: result.pushed
+        await announce({ ...assistantEvent({ text: mergeOnly ? `Merge done · ${result.sha}. Checks passed. Nothing published.` : result.pushed
           ? `Push done · ${result.files?.length || 0} files · ${result.sha}.${app?.builtin ? ' Restart Harness to load the changes.' : ''}`
           : 'Already up to date. Nothing new to push.' }), operation: 'push' });
-        usageHistory?.record('push.finished', { correlationId: requestId, outcome: 'published', durationMs: Date.now() - startedAt });
+        usageHistory?.record(mergeOnly ? 'merge.finished' : 'push.finished', { correlationId: requestId, outcome: mergeOnly ? 'merged' : 'published', durationMs: Date.now() - startedAt });
         return json(res, 200, result);
       } catch (e) {
         const note = noteEvent(`Not published: ${e.message}`, { publication: 'failed',
           pushReceipt: { machine: cluster.self.name || cluster.self.id, status: 'Failed', error: e.message } });
-        const reply = { ...assistantEvent({ text: `Push did not complete: ${e.message}` }), operation: 'push' };
+        const reply = { ...assistantEvent({ text: `${mergeOnly ? 'Merge' : 'Push'} did not complete: ${e.message}` }), operation: 'push' };
         session.events.push(note, reply);
         await store.save(session);
         broadcast(id, { kind: 'event', event: note });
         broadcast(id, { kind: 'event', event: reply });
-        usageHistory?.record('push.finished', { correlationId: requestId, outcome: 'failed', durationMs: Date.now() - startedAt });
+        usageHistory?.record(mergeOnly ? 'merge.finished' : 'push.finished', { correlationId: requestId, outcome: 'failed', durationMs: Date.now() - startedAt });
         return json(res, 409, { error: e.message });
       } finally {
         if (session.turnHost) {

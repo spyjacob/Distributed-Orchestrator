@@ -619,6 +619,39 @@ try {
   assert.ok(publishedChat.events.some(e => e.type === 'assistant' && e.operation === 'push' && /Push done/.test(e.text)));
   assert.ok(publishedChat.events.some(e => e.publication === 'published' && e.commitUrl !== undefined || e.pushReceipt?.status === 'Published'));
   assert.ok(!publishedChat.turnHost);
+  // Another tab can absorb published work without publishing its own changes.
+  const publisher = path.join(root,'publisher');
+  git(root,'clone',pushRemote,publisher);
+  git(publisher,'checkout','main');
+  await fs.writeFile(path.join(publisher,'peer.txt'),'from peer');
+  git(publisher,'add','.'); git(publisher,'commit','-m','peer update'); git(publisher,'push','origin','main');
+  const remoteBeforeMerge = git(publisher,'rev-parse','HEAD').toString().trim();
+  const modelCount = modelRequests.length;
+  const merged = await b.call('/api/git/merge?session='+summarySession.id,'POST',{session:summarySession.id});
+  assert.equal(merged.merged,true);
+  assert.equal(merged.pushed,false);
+  assert.equal(await fs.readFile(path.join(work,'peer.txt'),'utf8'),'from peer');
+  assert.equal(modelRequests.length,modelCount,'clean merge never calls AI');
+  assert.equal(git(root,'--git-dir='+pushRemote,'rev-parse','main').toString().trim(),remoteBeforeMerge);
+  // Divergent changes invoke repair, but a model that only talks cannot publish.
+  await fs.writeFile(path.join(work,'peer.txt'),'local intent');
+  git(work,'add','.'); git(work,'commit','-m','local intent');
+  await fs.writeFile(path.join(publisher,'peer.txt'),'remote intent');
+  git(publisher,'add','.'); git(publisher,'commit','-m','remote intent'); git(publisher,'push','origin','main');
+  const remoteConflict = git(publisher,'rev-parse','HEAD').toString().trim();
+  const conflict = await a.request('/api/git/merge?session='+summarySession.id,'POST',{session:summarySession.id});
+  assert.equal(conflict.status,409);
+  assert.ok(modelRequests.length > modelCount,'conflict invokes configured AI');
+  assert.equal(git(root,'--git-dir='+pushRemote,'rev-parse','main').toString().trim(),remoteConflict,'unresolved repair cannot publish');
+  git(work,'merge','--no-edit','-X','theirs','origin/main');
+  await fs.writeFile(path.join(work,'package.json'), JSON.stringify({scripts:{test:'node -e "process.exit(1)"'}}));
+  const beforeCheckRepair = modelRequests.length;
+  const failedChecks = await a.request('/api/git/merge?session='+summarySession.id,'POST',{session:summarySession.id});
+  assert.equal(failedChecks.status,409);
+  assert.ok(modelRequests.length > beforeCheckRepair,'failed configured checks invoke repair');
+  assert.equal(git(root,'--git-dir='+pushRemote,'rev-parse','main').toString().trim(),remoteConflict);
+
+
 
 
   const readme = await fs.readFile(path.join(work, 'README.md'), 'utf8');

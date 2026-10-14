@@ -2392,7 +2392,7 @@ async function paintGit(session) {
         · ${g.remote ? `remote <span class="mono">${esc(g.remote)}</span>` : '<span class="warn-text">no remote</span>'}</p>
       ${g.lastCommit ? `<p class="dim">last: <span class="mono">${esc(g.lastCommit)}</span></p>` : '<p class="dim">no commits yet</p>'}
        ${g.remote ? '<div id="g-vis"></div>' : ''}</details>
-      <div class="actions"><button class="ghost" id="g-now">${creating ? 'Create repository &amp; push' : 'Push to GitHub'}</button></div>`;
+      <div class="actions">${g.isolated ? '<button class="ghost" id="g-merge">Merge latest</button>' : ''}<button class="ghost" id="g-now">${creating ? 'Create repository &amp; push' : 'Push to GitHub'}</button></div>`;
   }
 
   box.insertAdjacentHTML('afterbegin', `<div class="item"><div class="grow"><div class="t">${esc(g.projectName || session.name)}</div></div></div><p class="dim">${esc(g.machine || 'This computer')} · ${g.busy ? 'Finish the current task before pushing' : creating ? 'Ready to create on GitHub' : g.pending ? 'Ready to push' : 'Up to date'}<br>${esc(g.summary || 'No pending changes.')}</p>`);
@@ -2438,6 +2438,17 @@ async function paintGit(session) {
       })
       .catch(() => {});
   }
+  if ($('g-merge')) $('g-merge').onclick = async () => {
+    const button = $('g-merge');
+    button.disabled = true;
+    closeSheet();
+    try {
+      await api(`/api/git/merge?session=${encodeURIComponent(session.id)}`, {
+        method:'POST', body:JSON.stringify({session:session.id}) });
+      await refreshState();
+    } catch(e) { showBanner(e.message, true); }
+    finally { button.disabled = false; }
+  };
   if ($('g-now')) {
     // Busy is a snapshot: the task may finish while this sheet stays open.
     // Let the server check it at click time and explain any refusal.
