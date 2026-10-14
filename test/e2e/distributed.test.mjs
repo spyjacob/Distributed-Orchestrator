@@ -341,10 +341,11 @@ try {
     innerHTML: '', textContent: '', classList: { toggle() {} }, insertAdjacentHTML() {},
   }]));
   let publishCalls = 0;
+  const pushBanners = [];
   const panel = vm.createContext({
     closeSheet() {}, window: {},
     state: { session: { id: 'panel' } }, $: id => gitNodes.get(id),
-    esc: String, clock: String, showBanner() {},
+    esc: String, clock: String, showBanner: text => pushBanners.push(text),
     api: async route => {
       if (route.startsWith('/api/git/push?')) {
         publishCalls++;
@@ -361,6 +362,12 @@ try {
   assert.equal(publishCalls, 1, 'click checks current server state');
   assert.match(gitNodes.get('g-push-status').textContent, /Not published: Finish the current task/);
   assert.equal(gitNodes.get('g-now').disabled, false, 'refused push can be retried without reopening');
+  pushBanners.length = 0;
+  panel.api = async route => route.startsWith('/api/git/push?')
+    ? { ok: true, pushed: true, files: ['app.js'], sha: 'abc123' }
+    : { repo: true, pending: false, busy: false, history: [] };
+  await gitNodes.get('g-now').onclick();
+  assert.deepEqual(pushBanners, [], 'successful push stays in chat without a banner');
   const state = await a.call('/api/state');
   assert.equal(state.apps.find(app => app.id === '__harness').executionHosts.length, 2);
   const s = await a.call('/api/sessions', 'POST', { appId: '__harness', name: 'remote', mode: 'chat', model: 'model-b', ownerNode: b.status.self });
@@ -616,7 +623,7 @@ try {
   const published = await a.call('/api/git/push?session=' + summarySession.id, 'POST', {session:summarySession.id});
   assert.equal(published.pushed,true);
   const publishedChat = await a.call('/api/sessions/' + summarySession.id);
-  assert.ok(publishedChat.events.some(e => e.type === 'assistant' && e.operation === 'push' && /Push done/.test(e.text)));
+  assert.ok(publishedChat.events.some(e => e.type === 'assistant' && e.operation === 'push' && e.outcome === 'success' && /Push done/.test(e.text)));
   assert.ok(publishedChat.events.some(e => e.publication === 'published' && e.commitUrl !== undefined || e.pushReceipt?.status === 'Published'));
   assert.ok(!publishedChat.turnHost);
   // Another tab can absorb published work without publishing its own changes.

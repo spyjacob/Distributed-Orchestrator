@@ -493,7 +493,7 @@ function turnHtml(turn, i, running, number, isLast) {
     const isFinal = j === finalIndex;
     const replyKey = key + '-final';
     const reply = `<div class="turn assistant${isFinal ? ' final-reply' : ''}">
-      <div class="who"><span class="tag">${esc(state.models[a.model]?.label || a.servedModel || a.model)}</span>
+      <div class="who">${a.operation === 'push' && a.outcome === 'success' ? '<span class="operation-success" aria-label="Success">✓</span>' : ''}<span class="tag">${esc(a.operation === 'push' ? 'Result' : state.models[a.model]?.label || a.servedModel || a.model)}</span>
         ${a.servedModel && a.servedModel !== a.model
           ? `<span class="served">${esc(a.servedModel)}</span>` : ''}
         <span class="at">${clock(a.ts)}</span>
@@ -2471,10 +2471,7 @@ async function paintGit(session) {
       window.harnessTrace?.('visible', {screen:'transcript',outcome:'push-starting'});
       try {
         const r = await api(`/api/git/push?session=${encodeURIComponent(session.id)}`, { method: 'POST', body: JSON.stringify({ session: session.id, visibility }) });
-        showBanner(r.skipped === 'no changes' ? 'nothing to integrate'
-          : !r.ok ? `git: ${r.error}`
-            : r.pushed ? `integrated and pushed ${r.files.length} files · ${r.sha}`
-              : `integrated ${r.sha} — not pushed: ${r.reason}`);
+        if (!r.ok) throw new Error(r.error || 'Push did not complete.');
       } catch (e) { value.pushError = e.message; showBanner(e.message, true); }
       finally {
         value.pushing = false;

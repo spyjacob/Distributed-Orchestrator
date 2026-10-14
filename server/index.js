@@ -1618,7 +1618,7 @@ Preserve both branches' intended behavior. Merge and commit the resolution on th
         await announce(note);
         await announce({ ...assistantEvent({ text: mergeOnly ? `Merge done · ${result.sha}. Checks passed. Nothing published.` : result.pushed
           ? `Push done · ${result.files?.length || 0} files · ${result.sha}.${app?.builtin ? ' Restart Harness to load the changes.' : ''}`
-          : 'Already up to date. Nothing new to push.' }), operation: 'push' });
+          : 'Already up to date. Nothing new to push.' }), operation: 'push', outcome: 'success' });
         usageHistory?.record(mergeOnly ? 'merge.finished' : 'push.finished', { correlationId: requestId, outcome: mergeOnly ? 'merged' : 'published', durationMs: Date.now() - startedAt });
         return json(res, 200, result);
       } catch (e) {

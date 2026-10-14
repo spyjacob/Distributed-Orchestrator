@@ -439,6 +439,8 @@ body {
 .turn.assistant .body em { color: var(--fg-dim); font-style: italic; }
 .turn.assistant .body { white-space: normal; }
 
+.operation-success { color: var(--green); margin-right: 6px; font-weight: 600; }
+
 .who .at { color: var(--fg-faint); font-weight: 400; margin-left: 6px; }
 
 /* Copy a reply out as plain text, for pasting into another session.
