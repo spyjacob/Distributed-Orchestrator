@@ -208,6 +208,22 @@ try {
   }
   // Exercise the served frontend with reordered status replies and tab switches.
   const frontend = await (await a.request('/app.js')).text();
+  const restartNotice = {textContent:'', hidden:true};
+  const noticeUi = vm.createContext({window:{}, $:()=>restartNotice});
+  vm.runInContext(frontend.slice(frontend.indexOf('const pendingRestarts ='),frontend.indexOf('async function refreshState()')),noticeUi);
+  const versions = await a.call('/api/harness/versions');
+  const host = versions.hosts.find(h => h.id === a.status.self);
+  noticeUi.paintRestartNotice({checkedAt:'1',hosts:[{...host,update:{restartRequired:true,head:'next-build'},state:'Restart needed'}]});
+  assert.equal(restartNotice.hidden,false);
+  noticeUi.paintRestartNotice({checkedAt:'2',hosts:[{id:host.id,state:'Unreachable'}]});
+  assert.equal(restartNotice.hidden,false,'unreachable does not mean updated');
+  noticeUi.paintRestartNotice({checkedAt:'3',hosts:[{...host,update:{}}]});
+  assert.equal(restartNotice.hidden,false,'missing update flags cannot clear pending restart');
+  noticeUi.paintRestartNotice({checkedAt:'4',hosts:[{...host,version:{revision:'next-build'},update:{}}]});
+  assert.equal(restartNotice.hidden,true,'verified running target clears the notice');
+  noticeUi.paintRestartNotice({checkedAt:'1',hosts:[{...host,update:{restartRequired:true,head:'next-build'}}]});
+  assert.equal(restartNotice.hidden,true,'stale responses cannot restore an old notice');
+
   const historyElements = new Map();
   let historyHtml = '', historyError = '';
   const historyUi = vm.createContext({ window:{}, state:{machines:{hosts:[{id:a.status.self,name:'model-a'},{id:b.status.self,name:'model-b'}]}},
@@ -358,14 +374,14 @@ try {
   assert.ok(release, 'a follower executed the model request');
   const queued = await a.call(`/api/sessions/${s.id}/queue`, 'POST', {text:'queued original'});
   assert.equal(queued.queued, true);
-  const pending = (await a.call(`/api/sessions/${s.id}/pending`)).pending;
+  const pending = (await a.call(`/api/sessions/${s.id}/pending`)).pending[0];
   assert.equal(pending.text,'queued original');
-  assert.equal((await b.call(`/api/sessions/${s.id}/pending`)).pending.pendingId,pending.pendingId);
+  assert.equal((await b.call(`/api/sessions/${s.id}/pending`)).pending[0].pendingId,pending.pendingId);
   await a.call(`/api/sessions/${s.id}/pending`, 'PATCH', {pendingId:pending.pendingId,text:'edited before sending'});
-  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.text,'edited before sending');
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending[0].text,'edited before sending');
   assert.equal((await a.request(`/api/sessions/${s.id}/pending`,'DELETE',{pendingId:'stale'})).status,409);
   await a.call(`/api/sessions/${s.id}/pending`, 'DELETE', {pendingId:pending.pendingId});
-  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending,null);
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.length,0);
   // Drive the served pending panel, including editing and cancelling on the owner.
   const panelQueued = await a.call(`/api/sessions/${s.id}/queue`, 'POST', {text:'panel draft'});
   const pendingElements = new Map();
@@ -377,7 +393,7 @@ try {
   pendingUi.message = panelQueued.pending;
   pendingUi.sessionId = s.id;
   vm.runInContext('pendingMessages.set(sessionId,message); paintMessagePending();',pendingUi);
-  assert.match(pendingElements.get('message-pending').innerHTML,/Queued/);
+  assert.match(pendingElements.get('message-pending').innerHTML,/pending-stack/);
   const disclosure = pendingElements.get('pending-disclosure');
   assert.match(pendingElements.get('message-pending').innerHTML, /<details id="pending-disclosure">/);
   disclosure.open = true; disclosure.ontoggle();
@@ -388,7 +404,7 @@ try {
   vm.runInContext('paintMessagePending();', pendingUi);
   assert.equal(pendingElements.get('pending-text-edit').value, 'panel edited', 'refresh preserves pending edits');
   await pendingElements.get('pending-save').onclick();
-  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.text,'panel edited');
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending[0].text,'panel edited');
   await pendingElements.get('pending-cancel').onclick();
   assert.equal(pendingElements.get('message-pending').hidden,true);
 
@@ -453,14 +469,23 @@ try {
   assert.ok(parallelResult.events.some(e => e.type === 'assistant'));
   assert.ok((await a.call('/api/state')).running.includes(s.id), 'another tab completes while the first is busy');
   assert.equal((await a.call('/api/state')).projectQueues, undefined);
+  for (const text of ['fifo-one','fifo-remove','fifo-three'])
+    await a.call(`/api/sessions/${s.id}/queue`, 'POST', {text});
+  const queuedMany = (await b.call(`/api/sessions/${s.id}/pending`)).pending;
+  assert.deepEqual(queuedMany.map(m=>m.text), ['fifo-one','fifo-remove','fifo-three']);
+  await a.call(`/api/sessions/${s.id}/pending`, 'DELETE', {pendingId:queuedMany[1].pendingId});
+  await a.call(`/api/sessions/${s.id}/pending`, 'PATCH', {pendingId:queuedMany[2].pendingId,text:'fifo-edited'});
+  assert.deepEqual((await a.call(`/api/sessions/${s.id}/pending`)).pending.map(m=>m.text),['fifo-one','fifo-edited']);
   release();
   let finished;
   for (let i = 0; i < 80; i++) {
     finished = await a.call(`/api/sessions/${s.id}`);
-    if (!finished.turnHost) break;
+    if (!finished.turnHost && finished.events.filter(e=>e.type === 'assistant').length >= 3) break;
     await pause();
   }
   assert.ok(!finished.turnHost);
+  assert.deepEqual(finished.events.filter(e=>e.type === 'user').map(e=>e.text), ['wait','fifo-one','fifo-edited']);
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.length,0);
   assert.equal(finished.ownerNode, b.status.self);
   assert.ok(finished.events.some(e => e.type === 'assistant' && e.text === 'model-b'));
   assert.equal((await a.request(`/api/sessions/${s.id}/rewind`, 'POST', { eventId: finished.events[0].id, revertFiles: true })).status, 409, 'file rewind cannot bypass publication order');
@@ -615,6 +640,11 @@ try {
   const unavailable = await a.request(`/api/execution-models?app=__harness&host=${b.status.self}`);
   assert.ok(!unavailable.ok, 'an offline computer never falls back to the serving computer’s models');
   assert.equal((await unavailable.json()).models, undefined);
+  const versionStart = Date.now();
+  const offlineVersions = await a.call('/api/harness/versions');
+  assert.ok(Date.now() - versionStart < 2000, 'display metadata does not wait for an offline peer timeout');
+  assert.ok(offlineVersions.hosts.find(h => h.id === a.status.self).version);
+  assert.ok(offlineVersions.hosts.find(h => h.id === b.status.self));
   const offlineHistory = await a.call('/api/diagnostics?action=all');
   assert.equal(offlineHistory.histories.find(h => h.host === b.status.self).unavailable, true);
   assert.ok(offlineHistory.histories.find(h => h.host === a.status.self).events.length);

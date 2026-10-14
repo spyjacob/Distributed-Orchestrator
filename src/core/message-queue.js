@@ -1,4 +1,4 @@
-// Keep one follow-up per session on the server, independent of browser lifetime.
+// Keep ordered follow-ups per session on the server, independent of browser lifetime.
 // Pending messages are intentionally not persisted across a server restart.
 export function createMessageQueue() {
   const active = new Map();
@@ -6,8 +6,7 @@ export function createMessageQueue() {
     try { await task.run(); }
     catch (e) { task.onError(e); }
     finally {
-      const next = entry.next;
-      entry.next = null;
+      const next = entry.next.shift();
       if (next) void drain(id, entry, next);
       else active.delete(id);
     }
@@ -15,23 +14,22 @@ export function createMessageQueue() {
   return {
     get size() { return active.size; },
     busy: id => active.has(id),
-    pending(id) { return active.get(id)?.next?.body || null; },
+    pending(id) { return (active.get(id)?.next || []).map(task => task.body); },
     edit(id, expected, text) {
-      const body = active.get(id)?.next?.body;
+      const body = active.get(id)?.next.find(task => task.body.pendingId === expected)?.body;
       if (!body || body.pendingId !== expected) throw new Error("This message has already started or changed.");
       body.text = text;
       return body;
     },
-    cancel(id) { const entry = active.get(id); if (entry) entry.next = null; },
+    cancel(id, expected) { const entry = active.get(id); if (entry) entry.next = expected ? entry.next.filter(task => task.body.pendingId !== expected) : []; },
     submit(id, run, { queue = false, onError = () => {}, body = null } = {}) {
       const entry = active.get(id);
       const task = { run, onError, body };
       if (entry) {
         if (!queue) throw new Error('A turn is already running. Use Queue next.');
-        if (entry.next) throw new Error('This tab already has a queued message. Your draft has been kept.');
-        entry.next = task;
+        entry.next.push(task);
       } else {
-        const fresh = { next: null };
+        const fresh = { next: [] };
         active.set(id, fresh);
         void drain(id, fresh, task);
       }

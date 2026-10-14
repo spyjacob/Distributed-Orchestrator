@@ -614,7 +614,6 @@ async function openSession(id) {
   openingSession = null;
 
   state.session = session;
-  try { state.models = (await api(`/api/sessions/${id}/models`)).models; } catch { /* owner may reconnect */ }
   if (state.session?.id !== id) return;
   tabs.chat.session = session;
   localStorage.setItem(sessionStorageKey, id);
@@ -623,6 +622,12 @@ async function openSession(id) {
   clearLive('chat');
   showSession();
   listen('chat', id);
+  // Model discovery must not hold the conversation behind a host probe.
+  api(`/api/sessions/${id}/models`).then(inventory => {
+    if (state.session?.id !== id) return;
+    state.models = inventory.models;
+    paintHeader();
+  }).catch(() => {});
 }
 
 /**
@@ -899,7 +904,7 @@ function listen(tab, id) {
       if (active) drawTranscript();
     }
     if (p.kind === 'pending' || p.kind === 'hello') {
-      if (p.kind === 'hello' || p.pending || pendingMessages.get(id)?.pendingId) pendingMessages.set(id, p.pending);
+      pendingMessages.set(id, p.pending || []);
       if (active) paintMessagePending();
       if (p.kind === 'pending') return;
     }
@@ -938,7 +943,7 @@ function listen(tab, id) {
       clearLive(tab);
       if (p.event.type === 'user' && t.session) t.session.events = t.session.events.filter(e => !e.optimistic);
       t.session?.events.push(p.event);
-      if (p.event.type === 'user' && !pendingMessages.get(id)?.pendingId) { pendingMessages.delete(id); paintMessagePending(); }
+
       if (active) drawTranscript();
       if (p.event.type === 'assistant') setRunning(true, t.startedAt || null, null, tab);
       return;
@@ -966,31 +971,47 @@ const pendingMessages = new Map();
 function paintMessagePending() {
   const box = $('message-pending');
   if (!box) return;
-  const id = cur().session?.id, message = pendingMessages.get(id);
-  box.hidden = !message;
-  if (!message) { box.replaceChildren(); delete box.pendingRenderKey; return; }
-  const renderKey = JSON.stringify([id, message.pendingId, message.text, message.attachments]);
+  const id = cur().session?.id;
+  const saved = pendingMessages.get(id);
+  const messages = Array.isArray(saved) ? saved : saved ? [saved] : [];
+  box.hidden = !messages.length;
+  if (!messages.length) { box.replaceChildren(); delete box.pendingRenderKey; return; }
+  const renderKey = JSON.stringify([id, messages]);
   if (box.pendingRenderKey === renderKey) return;
+  const wasOpen = $('pending-disclosure')?.open;
   box.pendingRenderKey = renderKey;
-  box.innerHTML = `<details id="pending-disclosure"><summary>${message.pendingId ? 'Queued message · click to preview' : 'Sending… · click to preview'}</summary><div class="pending-text"></div>${message.pendingId ? '<div class="actions"><button class="ghost" id="pending-edit">edit</button><button class="ghost" id="pending-cancel">cancel</button></div>' : ''}</details>`;
-  $('pending-disclosure').ontoggle = () => window.harnessTrace?.('visible', {screen:'pending-message',outcome:$('pending-disclosure').open ? 'expanded' : 'collapsed'});
-  box.querySelector('.pending-text').textContent = message.text || 'Attachment';
-  window.harnessTrace?.('visible', {screen:'pending-message',outcome:message.pendingId ? 'queued' : 'sending'});
-  if (!message.pendingId) return;
-  const change = async (method, text) => {
-    try {
-      const result = await api(`/api/sessions/${id}/pending`, {method, body:JSON.stringify({pendingId:message.pendingId,text})});
-      pendingMessages.set(id,result.pending); delete box.pendingRenderKey; paintMessagePending();
-    } catch(e) { showBanner(e.message); }
-  };
-  $('pending-cancel').onclick = () => change('DELETE');
-  $('pending-edit').onclick = () => {
-    box.innerHTML = '<label for="pending-text-edit">Edit queued message</label><textarea id="pending-text-edit"></textarea><div class="actions"><button class="primary" id="pending-save">save</button><button class="ghost" id="pending-back">back</button></div>';
-    $('pending-text-edit').value = message.text;
-    $('pending-save').onclick = () => change('PATCH', $('pending-text-edit').value);
-    $('pending-back').onclick = () => { delete box.pendingRenderKey; paintMessagePending(); };
-    window.harnessTrace?.('visible', {screen:'pending-message',outcome:'editing'});
-  };
+  box.innerHTML = '<details id="pending-disclosure"><summary></summary><div class="pending-stack"></div></details>';
+  const disclosure = $('pending-disclosure');
+  disclosure.open = Boolean(wasOpen);
+  disclosure.querySelector('summary').textContent = messages.length + ' queued · click to expand or collapse';
+  disclosure.ontoggle = () => window.harnessTrace?.('visible', {screen:'pending-message',outcome:disclosure.open ? 'expanded' : 'collapsed'});
+  const stack = box.querySelector('.pending-stack');
+  stack.innerHTML = messages.map((message, i) => {
+    const suffix = i ? '-' + i : '';
+    return '<div class="pending-row"><div class="pending-text" id="pending-preview'+suffix+'"></div>' +
+      (message.pendingId ? '<div class="actions"><button class="ghost" id="pending-edit'+suffix+'">edit</button><button class="ghost" id="pending-cancel'+suffix+'">cancel message</button></div>' : '<div class="dim">Sending…</div>') + '</div>';
+  }).join('');
+  messages.forEach((message, i) => {
+    const suffix = i ? '-' + i : '';
+    $('pending-preview'+suffix).textContent = (i+1) + '. ' + (message.text || 'Attachment');
+    if (!message.pendingId) return;
+    const change = async (method, text) => {
+      try {
+        const result = await api(`/api/sessions/${id}/pending`, {method, body:JSON.stringify({pendingId:message.pendingId,text})});
+        pendingMessages.set(id,result.pending); delete box.pendingRenderKey; paintMessagePending();
+      } catch(e) { showBanner(e.message); }
+    };
+    $('pending-cancel'+suffix).onclick = () => change('DELETE');
+    $('pending-edit'+suffix).onclick = () => {
+      const preview = $('pending-preview'+suffix);
+      preview.innerHTML = '<textarea id="pending-text-edit'+suffix+'"></textarea><div class="actions"><button class="primary" id="pending-save'+suffix+'">save</button><button class="ghost" id="pending-back'+suffix+'">back</button></div>';
+      $('pending-text-edit'+suffix).value = message.text;
+      $('pending-save'+suffix).onclick = () => change('PATCH', $('pending-text-edit'+suffix).value);
+      $('pending-back'+suffix).onclick = () => { delete box.pendingRenderKey; paintMessagePending(); };
+      window.harnessTrace?.('visible', {screen:'pending-message',outcome:'editing'});
+    };
+  });
+  window.harnessTrace?.('visible', {screen:'pending-message',outcome:'queued',count:messages.length});
 }
 
 async function send(queue = false) {
@@ -1003,13 +1024,14 @@ async function send(queue = false) {
   if (!t.session) return showBanner('open a session first — tap ☰');
   if (t.running && !queue) return showBanner('Tap Queue next to send after this turn, or Stop to interrupt.');
   const sessionId = t.session.id;
-  if (pendingMessages.get(sessionId)) return showBanner('Edit or cancel the pending message first.');
+
   const draft = $('input').value;
   const button = $(queue ? 'queue' : 'send');
   if (button.disabled) return;
   button.disabled = true;
   const optimistic = { id: 'pending-' + Date.now(), ts: Date.now(), type: 'user', text, attachments: shots, optimistic: true };
-  if (queue) pendingMessages.set(sessionId, {text});
+  const previousQueue = pendingMessages.get(sessionId) || [];
+  if (queue) pendingMessages.set(sessionId, [...previousQueue, {text}]);
   else { t.session.events.push(optimistic); drawTranscript(); }
   $('input').value = '';
   $('input').style.height = 'auto';
@@ -1042,7 +1064,7 @@ async function send(queue = false) {
       pendingShots.push(...shots.filter(a => !pendingShots.includes(a)));
       paintPending(); drawTranscript();
     }
-    pendingMessages.delete(sessionId); paintMessagePending();
+    pendingMessages.set(sessionId, previousQueue); paintMessagePending();
     if (!queue && cur().session?.id === sessionId) setRunning(false);
     showBanner(e.message);
   } finally { button.disabled = false; }
@@ -1092,6 +1114,30 @@ async function refreshPushStatus() {
   finally { value.polling = false; }
 }
 
+const pendingRestarts = new Map();
+let restartNoticeCheckedAt = '';
+function paintRestartNotice(result) {
+  if (result.checkedAt && result.checkedAt < restartNoticeCheckedAt) return;
+  restartNoticeCheckedAt = result.checkedAt || restartNoticeCheckedAt;
+  for (const host of result.hosts) {
+    const update = host.update || {};
+    const previous = pendingRestarts.get(host.id);
+    if (update.restartRequired || update.available) {
+      pendingRestarts.set(host.id, { name: host.name || host.id,
+        target: update.available ? update.latest : update.head,
+        text: host.state });
+    } else if (previous && !host.stale && host.version?.revision === previous.target && !host.version.dirty) {
+      pendingRestarts.delete(host.id);
+    }
+  }
+  const notice = $('update-notice');
+  const text = [...pendingRestarts.values()].map(host => `${host.name}: ${host.text}`).join('; ');
+  if (notice.textContent !== text) window.harnessTrace?.('visible', {
+    screen: 'update-notice', outcome: text ? 'restart-pending' : 'verified-current', count: pendingRestarts.size });
+  notice.textContent = text;
+  notice.hidden = pendingRestarts.size === 0;
+}
+
 async function refreshState() {
   const s = await api('/api/state');
   // Assign field by field. A blanket Object.assign once let the server's
@@ -1099,12 +1145,7 @@ async function refreshState() {
   // of the same name - and [] is truthy, so send() silently refused forever.
   if (!state.harnessCheckedAt || Date.now() - state.harnessCheckedAt > 30_000) {
     state.harnessCheckedAt = Date.now();
-    api('/api/harness/versions').then(result => {
-      const pending = result.hosts.filter(host => host.update?.restartRequired || host.update?.available);
-      const notice = $('update-notice');
-      notice.textContent = pending.map(host => `${host.name || host.id}: ${host.state}`).join('; ');
-      notice.hidden = pending.length === 0;
-    }).catch(() => {});
+    api('/api/harness/versions').then(paintRestartNotice).catch(() => {});
   }
   state.machines = s.machines;
   state.apps = s.apps ?? [];
@@ -1474,7 +1515,7 @@ async function harnessVersionSheet() {
       <p class="dim">${result.aligned ? 'All paired machines run the same commit.' : 'Some machines need attention. Different commits may be ahead or behind.'}</p>
       ${result.hosts.map(host => `<div class="item machine-item"><div class="grow">
         <div class="t">${esc(host.name || host.id)}</div>
-        <div class="s">${esc(host.state)}</div>
+        <div class="s">${esc(host.state)}${host.stale ? ' · last known / unverified' : ''}</div>
         <div class="s">Active commit ${(esc(host.version?.revision || 'unknown')).slice(0, 12)} · committed ${esc(stamp(host.version?.committedAt))}</div>
         <div class="s">Started ${esc(stamp(host.version?.startedAt))}</div>
         ${host.update?.head && host.update.head !== host.version?.revision ? `<div class="s">Downloaded ${esc(host.update.head.slice(0, 12))}</div>` : ''}

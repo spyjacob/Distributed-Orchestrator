@@ -29,3 +29,30 @@ export async function harnessVersions(cluster, local, { request = fetch, observe
   return { version: local.version, hosts, checkedAt: new Date().toISOString(),
     aligned: hosts.length > 0 && hosts.every(h => h.state === 'Same running commit') };
 }
+
+// Display-only observations. Execution/restart decisions still use fresh checks.
+export function versionMetadata(cluster, { observe = () => {} } = {}) {
+  const peers = new Map();
+  let pending = null, checked = 0;
+  return async local => {
+    if (!pending && Date.now() - checked >= 10000) {
+      pending = harnessVersions(cluster, local, { observe }).then(result => {
+        for (const host of result.hosts) if (host.id !== cluster.self.id) {
+          const previous = peers.get(host.id);
+          peers.set(host.id, host.version
+            ? { ...host, observedAt: result.checkedAt, stale: false }
+            : { ...previous, ...host, stale: true, busy: true });
+        }
+      }).catch(() => {}).finally(() => { checked = Date.now(); pending = null; });
+    }
+    const result = await harnessVersions({ self: cluster.self, replica: { members: () => [cluster.self] } }, local);
+    for (const host of cluster.replica.members()) if (host.id !== cluster.self.id) {
+      const saved = peers.get(host.id);
+      const stale = !saved || saved.stale || Date.now() - Date.parse(saved.observedAt) > 30000;
+      result.hosts.push(saved ? { ...saved, stale, busy: stale || saved.busy }
+        : { id: host.id, name: host.name, stale: true, state: 'Checking in background', busy: true });
+    }
+    result.aligned = result.hosts.every(h => !h.stale && h.state === 'Same running commit');
+    return result;
+  };
+}

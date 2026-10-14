@@ -33,7 +33,7 @@ import { hostPairing } from '../src/core/cluster/pairing.js';
 import { executionHosts, executionOwner, assignmentError, sessionWriteError, recoverStoppedTurn } from '../src/core/cluster/execution.js';
 import { createCluster } from '../src/core/cluster/index.js';
 import { projectRecovery } from '../src/core/cluster/project-recovery.js';
-import { harnessVersions } from '../src/core/harness-version.js';
+import { harnessVersions, versionMetadata } from '../src/core/harness-version.js';
 import { createNodes } from '../src/core/nodes.js';
 import { createAISources } from '../src/core/ai-sources.js';
 import { modelInventory, machineHelp } from '../src/core/machine-help.js';
@@ -97,6 +97,7 @@ const aiSources = createAISources(USER_DATA);
 
 let cluster = null;
 let usageHistory = null;
+let readVersionMetadata;
 const observedVersions = new Map();
 function observeVersion(peer, version) {
   const value = version?.revision || 'unavailable';
@@ -488,7 +489,7 @@ async function scheduleTurn(id, body, queueNext = false) {
   const started = new Promise((resolve, reject) => { acknowledge = resolve; refuse = reject; });
   messageQueue.submit(id, async () => {
     try {
-      broadcast(id, { kind: 'pending', pending: null, starting: queued ? body : null });
+      broadcast(id, { kind: 'pending', pending: messageQueue.pending(id), starting: queued ? body : null });
       await dispatchMessage(id, body, (code, value) => {
         if (code >= 400) throw new Error(value.error);
         acknowledge();
@@ -1400,7 +1401,7 @@ const server = http.createServer(async (req, res) => {
         version: loadedVersion, update: harnessUpdate });
     }
     if (req.method === 'GET' && pathname === '/api/harness/versions') {
-      return json(res, 200, await harnessVersions(cluster, { node: cluster.self.id, version: loadedVersion, update: harnessUpdate, busy: Boolean(running.size || messageQueue.size), restarting }, { observe: observeVersion }));
+      return json(res, 200, await readVersionMetadata({ node: cluster.self.id, version: loadedVersion, update: harnessUpdate, busy: Boolean(running.size || messageQueue.size), restarting }));
     }
     if (req.method === 'POST' && pathname === '/api/harness/restart') {
       if (restarting) return json(res, 409, { error: 'A restart is already in progress.' });
@@ -2002,12 +2003,12 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'GET') return json(res, 200, { pending: messageQueue.pending(id) });
         if (['PATCH', 'DELETE'].includes(req.method)) {
           const body = await readBody(req);
-          const pending = messageQueue.pending(id);
+          const pending = messageQueue.pending(id).find(message => message.pendingId === body.pendingId);
           if (!pending || pending.pendingId !== body.pendingId) return json(res, 409, { error: 'This message has already started or changed.' });
           if (req.method === 'PATCH') {
             if (typeof body.text !== 'string' || (!body.text.trim() && !pending.attachments?.length)) return json(res, 400, {error:'Enter a message.'});
             messageQueue.edit(id, body.pendingId, body.text.trim());
-          } else messageQueue.cancel(id);
+          } else messageQueue.cancel(id, body.pendingId);
           usageHistory?.record('queue.changed', {correlationId:requestId, outcome:req.method === 'PATCH' ? 'edited' : 'cancelled'});
           broadcast(id, {kind:'pending', pending:messageQueue.pending(id)});
           return json(res, 200, {pending:messageQueue.pending(id)});
@@ -2102,6 +2103,7 @@ function lanAddress() {
 await store.init(USER_DATA);
 TOKEN = await resolveToken(USER_DATA);
 cluster = await createCluster(USER_DATA, { port: PORT });
+readVersionMetadata = versionMetadata(cluster, { observe: observeVersion });
 usageHistory = diagnostics(USER_DATA, cluster.self.id, loadedVersion.revision);
 await usageHistory.record('server.started');
 let lastHealth = '';
