@@ -173,8 +173,10 @@ body {
   background: var(--bg-2);
 }
 
+#composer-message { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
 #input {
-  flex: 1; min-width: 0;
+  flex: 0 0 auto; width: 100%; min-width: 0;
   background: var(--bg-3); color: var(--fg);
   border: 1px solid var(--line); border-radius: 12px;
   padding: 11px 12px;
@@ -788,6 +790,14 @@ button.primary.danger:active { background: #db5f78; }
 #network-gate[hidden] { display: none; }
 #network-gate p { max-width: 36rem; color: var(--fg-dim); overflow-wrap: anywhere; }
 
-#message-pending { padding: 10px 16px; background: var(--bg-2); border-top: 1px solid var(--line); max-height: 30vh; overflow: auto; }
+#message-pending { flex: 0 0 auto; min-height: 0; box-sizing: border-box; width: 100%; padding: 0 12px; background: var(--bg-3); border: 1px solid var(--line); border-radius: 12px; max-height: 30dvh; overflow: auto; }
+#message-pending summary { min-height: 44px; display: list-item; align-content: center; cursor: pointer; color: var(--fg-dim); overflow-wrap: anywhere; }
+#message-pending details[open] { padding-bottom: 10px; }
+#message-pending > label { display: block; padding-top: 10px; }
 #message-pending .pending-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 #message-pending textarea { width: 100%; min-height: 70px; box-sizing: border-box; background: var(--bg-3); color: var(--fg); border: 1px solid var(--line); font: inherit; }
+
+@media (max-width: 600px) {
+  #composer { flex-wrap: wrap; }
+  #composer-message { flex-basis: 100%; }
+}

@@ -44,12 +44,14 @@
       </div>
     </main>
 
-    <section id="message-pending" hidden aria-live="polite"></section>
     <div id="pending" hidden></div>
 
 
     <footer id="composer">
-      <textarea id="input" rows="1" placeholder="Describe what to build…" enterkeyhint="send"></textarea>
+      <div id="composer-message">
+        <section id="message-pending" hidden aria-live="polite"></section>
+        <textarea id="input" rows="1" placeholder="Describe what to build…" enterkeyhint="send"></textarea>
+      </div>
       <input id="pick" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.html,.xml,.rtf,.docx" multiple hidden />
       <button id="push-panel" class="ghost attach-btn" aria-label="Review pending changes and push">Push</button>
       <button id="attach" class="ghost attach-btn" aria-label="Attach a photo">＋</button>

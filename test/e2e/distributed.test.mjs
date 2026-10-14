@@ -350,8 +350,15 @@ try {
   pendingUi.sessionId = s.id;
   vm.runInContext('pendingMessages.set(sessionId,message); paintMessagePending();',pendingUi);
   assert.match(pendingElements.get('message-pending').innerHTML,/Queued/);
+  const disclosure = pendingElements.get('pending-disclosure');
+  assert.match(pendingElements.get('message-pending').innerHTML, /<details id="pending-disclosure">/);
+  disclosure.open = true; disclosure.ontoggle();
+  vm.runInContext('paintMessagePending();', pendingUi);
+  assert.equal(pendingElements.get('pending-disclosure'), disclosure);
   pendingElements.get('pending-edit').onclick();
   pendingElements.get('pending-text-edit').value = 'panel edited';
+  vm.runInContext('paintMessagePending();', pendingUi);
+  assert.equal(pendingElements.get('pending-text-edit').value, 'panel edited', 'refresh preserves pending edits');
   await pendingElements.get('pending-save').onclick();
   assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.text,'panel edited');
   await pendingElements.get('pending-cancel').onclick();

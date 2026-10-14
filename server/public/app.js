@@ -952,15 +952,19 @@ function paintMessagePending() {
   if (!box) return;
   const id = cur().session?.id, message = pendingMessages.get(id);
   box.hidden = !message;
-  if (!message) { box.replaceChildren(); return; }
-  box.innerHTML = `<div class="s">${message.pendingId ? 'Queued · sends after this turn' : 'Sending…'}</div><div class="pending-text"></div>${message.pendingId ? '<div class="actions"><button class="ghost" id="pending-edit">edit</button><button class="ghost" id="pending-cancel">cancel</button></div>' : ''}`;
+  if (!message) { box.replaceChildren(); delete box.pendingRenderKey; return; }
+  const renderKey = JSON.stringify([id, message.pendingId, message.text, message.attachments]);
+  if (box.pendingRenderKey === renderKey) return;
+  box.pendingRenderKey = renderKey;
+  box.innerHTML = `<details id="pending-disclosure"><summary>${message.pendingId ? 'Queued message · click to preview' : 'Sending… · click to preview'}</summary><div class="pending-text"></div>${message.pendingId ? '<div class="actions"><button class="ghost" id="pending-edit">edit</button><button class="ghost" id="pending-cancel">cancel</button></div>' : ''}</details>`;
+  $('pending-disclosure').ontoggle = () => window.harnessTrace?.('visible', {screen:'pending-message',outcome:$('pending-disclosure').open ? 'expanded' : 'collapsed'});
   box.querySelector('.pending-text').textContent = message.text || 'Attachment';
   window.harnessTrace?.('visible', {screen:'pending-message',outcome:message.pendingId ? 'queued' : 'sending'});
   if (!message.pendingId) return;
   const change = async (method, text) => {
     try {
       const result = await api(`/api/sessions/${id}/pending`, {method, body:JSON.stringify({pendingId:message.pendingId,text})});
-      pendingMessages.set(id,result.pending); paintMessagePending();
+      pendingMessages.set(id,result.pending); delete box.pendingRenderKey; paintMessagePending();
     } catch(e) { showBanner(e.message); }
   };
   $('pending-cancel').onclick = () => change('DELETE');
@@ -968,7 +972,8 @@ function paintMessagePending() {
     box.innerHTML = '<label for="pending-text-edit">Edit queued message</label><textarea id="pending-text-edit"></textarea><div class="actions"><button class="primary" id="pending-save">save</button><button class="ghost" id="pending-back">back</button></div>';
     $('pending-text-edit').value = message.text;
     $('pending-save').onclick = () => change('PATCH', $('pending-text-edit').value);
-    $('pending-back').onclick = paintMessagePending;
+    $('pending-back').onclick = () => { delete box.pendingRenderKey; paintMessagePending(); };
+    window.harnessTrace?.('visible', {screen:'pending-message',outcome:'editing'});
   };
 }
 
