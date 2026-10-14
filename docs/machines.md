@@ -83,7 +83,7 @@ clean copies about every two minutes so work pushed from another machine arrives
 Unticking a machine deletes its copy only once it has no uncommitted, stashed or
 unpushed work; otherwise the copy is kept and flagged in Machines and in the
 project sheet. Deleting the project record never deletes other machines' copies.
-A project needs a Git remote (created on its first saved turn when GitHub is
+A project needs a Git remote (created on its first successful Push when GitHub is
 connected) before another machine can clone it. Projects made before this keep
 living only on the machine that made them. Project files are no longer copied
 through the cluster log, so there is no size limit; old checkpoints are dropped.
@@ -134,7 +134,7 @@ Windows uses Git for Windows and the normal Windows Tailscale application.
 No WSL installation is required. For GitHub authorization install
 GitHub CLI as well. Install the desired model CLIs separately on execution hosts.
 
-Clone this repository, then run the entry point in its root:
+Clone your own fork (see the [quick start](../README.md)), then run the entry point in its root:
 
 | System | Launcher |
 | --- | --- |
@@ -254,12 +254,11 @@ system connection. GitHub CLI must be installed on execution hosts.
 Authorization uses temporary CLI configuration. If the main host changes during
 login, restart authorization on the new main. Completed connections replicate.
 
-Before connecting, automatic Git saves remain local; cluster synchronization
-continues independently. After connecting, sessions with automatic Git enabled
-push changed turns and can create private app repositories. Connecting does not
-bulk-publish existing projects. Repository visibility and automatic Git controls
-remain under **Edit session → Git & GitHub**. GitHub is for project files and
-commits, not a backup of the orchestrator's session database or credentials.
+Work stays local until you press **Push**. After connecting, Push can publish to
+an existing remote or create a repository for a new project. Connecting does not
+change an existing Git remote or bulk-publish projects. Use the same fork on all
+hosts when editing DO itself; verify its origin as described in the quick start.
+GitHub stores project files and commits, not the session database or credentials.
 
 ## Interrupted work and the published project
 
