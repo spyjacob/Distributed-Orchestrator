@@ -15,10 +15,17 @@ export function createMessageQueue() {
   return {
     get size() { return active.size; },
     busy: id => active.has(id),
+    pending(id) { return active.get(id)?.next?.body || null; },
+    edit(id, expected, text) {
+      const body = active.get(id)?.next?.body;
+      if (!body || body.pendingId !== expected) throw new Error("This message has already started or changed.");
+      body.text = text;
+      return body;
+    },
     cancel(id) { const entry = active.get(id); if (entry) entry.next = null; },
-    submit(id, run, { queue = false, onError = () => {} } = {}) {
+    submit(id, run, { queue = false, onError = () => {}, body = null } = {}) {
       const entry = active.get(id);
-      const task = { run, onError };
+      const task = { run, onError, body };
       if (entry) {
         if (!queue) throw new Error('A turn is already running. Use Queue next.');
         if (entry.next) throw new Error('This tab already has a queued message. Your draft has been kept.');

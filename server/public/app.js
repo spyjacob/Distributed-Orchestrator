@@ -465,8 +465,8 @@ function turnHtml(turn, i, running, number, isLast) {
 
     bits.push(`<div class="turn user">
       <div class="who"><span class="qn">${turn.user.turnNumber ?? number}</span> you
-        <span class="at">${clock(turn.user.ts)}</span>${turnCommitLink(turn)}${
-  messageActions(turn.user.id, { rewind: true })}${messageToggle(key + '-input', 'your message')}</div>
+        <span class="at">${turn.user.optimistic ? 'Sending…' : clock(turn.user.ts)}</span>${turnCommitLink(turn)}${
+  turn.user.optimistic ? '' : messageActions(turn.user.id, { rewind: true })}${messageToggle(key + '-input', 'your message')}</div>
       <div id="fold-${esc(key)}-input"${closedFolds.has(key + '-input') ? ' hidden' : ''}><div class="user-message">${esc(turn.user.text)}${
   (turn.user.attachments ?? []).length
     ? `<div class="shots">${turn.user.attachments.map((a) => (a.role === 'document'
@@ -799,6 +799,7 @@ function showBanner(msg, warn = false) {
 }
 
 function paintComposerAction() {
+  paintMessagePending();
   const busy = cur().running;
   const hasDraft = Boolean($('input').value.trim()) || pendingShots.length > 0;
   $('send').hidden = busy;
@@ -877,6 +878,15 @@ function listen(tab, id) {
     const p = JSON.parse(msg.data);
     const active = tab === state.tab;
 
+    if (p.kind === 'pending' && p.starting && t.session) {
+      t.session.events.push({id:'pending-' + p.starting.pendingId, ts:Date.now(), type:'user', text:p.starting.text, attachments:p.starting.attachments, optimistic:true});
+      if (active) drawTranscript();
+    }
+    if (p.kind === 'pending' || p.kind === 'hello') {
+      if (p.kind === 'hello' || p.pending || pendingMessages.get(id)?.pendingId) pendingMessages.set(id, p.pending);
+      if (active) paintMessagePending();
+      if (p.kind === 'pending') return;
+    }
     if (p.kind === 'hello') {
       t.needsTranscript = true;
       setRunning(p.running, p.startedAt, p.last, tab);
@@ -910,7 +920,9 @@ function listen(tab, id) {
     if (p.kind === 'started') setRunning(true, p.startedAt, null, tab);
     if (p.kind === 'event') {
       clearLive(tab);
+      if (p.event.type === 'user' && t.session) t.session.events = t.session.events.filter(e => !e.optimistic);
       t.session?.events.push(p.event);
+      if (p.event.type === 'user' && !pendingMessages.get(id)?.pendingId) { pendingMessages.delete(id); paintMessagePending(); }
       if (active) drawTranscript();
       if (p.event.type === 'assistant') setRunning(true, t.startedAt || null, null, tab);
       return;
@@ -934,6 +946,32 @@ function listen(tab, id) {
   es.onerror = () => {}; // EventSource reconnects on its own
 }
 
+const pendingMessages = new Map();
+function paintMessagePending() {
+  const box = $('message-pending');
+  if (!box) return;
+  const id = cur().session?.id, message = pendingMessages.get(id);
+  box.hidden = !message;
+  if (!message) { box.replaceChildren(); return; }
+  box.innerHTML = `<div class="s">${message.pendingId ? 'Queued · sends after this turn' : 'Sending…'}</div><div class="pending-text"></div>${message.pendingId ? '<div class="actions"><button class="ghost" id="pending-edit">edit</button><button class="ghost" id="pending-cancel">cancel</button></div>' : ''}`;
+  box.querySelector('.pending-text').textContent = message.text || 'Attachment';
+  window.harnessTrace?.('visible', {screen:'pending-message',outcome:message.pendingId ? 'queued' : 'sending'});
+  if (!message.pendingId) return;
+  const change = async (method, text) => {
+    try {
+      const result = await api(`/api/sessions/${id}/pending`, {method, body:JSON.stringify({pendingId:message.pendingId,text})});
+      pendingMessages.set(id,result.pending); paintMessagePending();
+    } catch(e) { showBanner(e.message); }
+  };
+  $('pending-cancel').onclick = () => change('DELETE');
+  $('pending-edit').onclick = () => {
+    box.innerHTML = '<label for="pending-text-edit">Edit queued message</label><textarea id="pending-text-edit"></textarea><div class="actions"><button class="primary" id="pending-save">save</button><button class="ghost" id="pending-back">back</button></div>';
+    $('pending-text-edit').value = message.text;
+    $('pending-save').onclick = () => change('PATCH', $('pending-text-edit').value);
+    $('pending-back').onclick = paintMessagePending;
+  };
+}
+
 async function send(queue = false) {
   if (window.dictationBusy?.()) return showBanner('Finish or cancel dictation before sending.');
   const text = $('input').value.trim();
@@ -944,10 +982,19 @@ async function send(queue = false) {
   if (!t.session) return showBanner('open a session first — tap ☰');
   if (t.running && !queue) return showBanner('Tap Queue next to send after this turn, or Stop to interrupt.');
   const sessionId = t.session.id;
+  if (pendingMessages.get(sessionId)) return showBanner('Edit or cancel the pending message first.');
   const draft = $('input').value;
   const button = $(queue ? 'queue' : 'send');
   if (button.disabled) return;
   button.disabled = true;
+  const optimistic = { id: 'pending-' + Date.now(), ts: Date.now(), type: 'user', text, attachments: shots, optimistic: true };
+  if (queue) pendingMessages.set(sessionId, {text});
+  else { t.session.events.push(optimistic); drawTranscript(); }
+  $('input').value = '';
+  $('input').style.height = 'auto';
+  pendingShots = pendingShots.filter(a => !shots.includes(a));
+  paintPending();
+  paintMessagePending();
   if (!queue) setRunning(true);
   showBanner('');
   pinned = true;
@@ -960,15 +1007,21 @@ async function send(queue = false) {
       }),
     });
     if (cur().session?.id === sessionId) {
-      if ($('input').value === draft) {
-        $('input').value = '';
-        $('input').style.height = 'auto';
-      }
       pendingShots = pendingShots.filter(a => !shots.includes(a));
       paintPending();
-      if (result.queued) showBanner('Message queued for this tab. Stop cancels the queued message too.');
+      if (result.queued) {
+        pendingMessages.set(sessionId, result.pending);
+      } else pendingMessages.delete(sessionId);
+      paintMessagePending();
     }
   } catch (e) {
+    if (t.session?.id === sessionId) t.session.events = t.session.events.filter(e => e.id !== optimistic.id);
+    if (cur().session?.id === sessionId) {
+      if (!$('input').value) $('input').value = draft;
+      pendingShots.push(...shots.filter(a => !pendingShots.includes(a)));
+      paintPending(); drawTranscript();
+    }
+    pendingMessages.delete(sessionId); paintMessagePending();
     if (!queue && cur().session?.id === sessionId) setRunning(false);
     showBanner(e.message);
   } finally { button.disabled = false; }

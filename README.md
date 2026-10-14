@@ -210,3 +210,12 @@ Main files:
 ## Licence
 
 MIT.
+
+Queued follow-ups appear directly above the composer. Edit saves changes on the
+owning computer; cancel removes only that pending message. Refresh reconnects
+to its server-held state. The queue still lives in server memory: a forced
+shutdown loses it, and Stop cancels it. If the message has already begun,
+edit/cancel returns a conflict rather than modifying the running turn.
+Sending shows a provisional conversation entry immediately; a rejected request
+restores its draft. Diagnostics record pending-panel visibility and queue edits
+or cancellation without storing message text.

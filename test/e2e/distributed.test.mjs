@@ -328,6 +328,37 @@ try {
   await a.call(`/api/sessions/${s.id}/send`, 'POST', { text: 'wait' });
   for (let i = 0; i < 80 && !release; i++) await pause();
   assert.ok(release, 'a follower executed the model request');
+  const queued = await a.call(`/api/sessions/${s.id}/queue`, 'POST', {text:'queued original'});
+  assert.equal(queued.queued, true);
+  const pending = (await a.call(`/api/sessions/${s.id}/pending`)).pending;
+  assert.equal(pending.text,'queued original');
+  assert.equal((await b.call(`/api/sessions/${s.id}/pending`)).pending.pendingId,pending.pendingId);
+  await a.call(`/api/sessions/${s.id}/pending`, 'PATCH', {pendingId:pending.pendingId,text:'edited before sending'});
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.text,'edited before sending');
+  assert.equal((await a.request(`/api/sessions/${s.id}/pending`,'DELETE',{pendingId:'stale'})).status,409);
+  await a.call(`/api/sessions/${s.id}/pending`, 'DELETE', {pendingId:pending.pendingId});
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending,null);
+  // Drive the served pending panel, including editing and cancelling on the owner.
+  const panelQueued = await a.call(`/api/sessions/${s.id}/queue`, 'POST', {text:'panel draft'});
+  const pendingElements = new Map();
+  const pendingUi = vm.createContext({ window:{}, cur:()=>({session:{id:s.id}}),
+    $: id => { if (!pendingElements.has(id)) pendingElements.set(id,{querySelector:()=>({}),replaceChildren(){}}); return pendingElements.get(id); },
+    api:(route,opts)=>a.call(route,opts.method,JSON.parse(opts.body)),
+    showBanner: text => assert.fail(text) });
+  vm.runInContext(frontend.slice(frontend.indexOf('const pendingMessages ='),frontend.indexOf('async function send(queue')),pendingUi);
+  pendingUi.message = panelQueued.pending;
+  pendingUi.sessionId = s.id;
+  vm.runInContext('pendingMessages.set(sessionId,message); paintMessagePending();',pendingUi);
+  assert.match(pendingElements.get('message-pending').innerHTML,/Queued/);
+  pendingElements.get('pending-edit').onclick();
+  pendingElements.get('pending-text-edit').value = 'panel edited';
+  await pendingElements.get('pending-save').onclick();
+  assert.equal((await a.call(`/api/sessions/${s.id}/pending`)).pending.text,'panel edited');
+  await pendingElements.get('pending-cancel').onclick();
+  assert.equal(pendingElements.get('message-pending').hidden,true);
+
+  assert.ok((await a.call('/api/state')).running.includes(s.id),'cancelling pending leaves current turn running');
+
   const activeState = await a.call('/api/state');
   const activeSession = activeState.sessions.find(row => row.id === s.id);
   assert.equal(activeSession.turnHost, b.status.self);

@@ -483,10 +483,12 @@ async function requireConnection() {
 async function scheduleTurn(id, body, queueNext = false) {
   usageHistory?.record('turn.requested', { correlationId: body.traceId });
   const queued = messageQueue.busy(id);
+  body.pendingId = crypto.randomUUID();
   let acknowledge, refuse;
   const started = new Promise((resolve, reject) => { acknowledge = resolve; refuse = reject; });
   messageQueue.submit(id, async () => {
     try {
+      broadcast(id, { kind: 'pending', pending: null, starting: queued ? body : null });
       await dispatchMessage(id, body, (code, value) => {
         if (code >= 400) throw new Error(value.error);
         acknowledge();
@@ -495,7 +497,8 @@ async function scheduleTurn(id, body, queueNext = false) {
       refuse(e);
       broadcast(id, { kind: 'error', error: e.message });
     }
-  }, { queue: queueNext, onError: refuse });
+  }, { queue: queueNext, onError: refuse, body });
+  if (queued) broadcast(id, { kind: 'pending', pending: messageQueue.pending(id) });
   if (queued) { started.catch(() => {}); return true; }
   await started;
   return false;
@@ -1896,13 +1899,13 @@ const server = http.createServer(async (req, res) => {
         session.projectDirIsHome = path.resolve(session.projectDir) === path.resolve(os.homedir());
         return json(res, 200, session);
       }
-      if (req.method === 'DELETE' && id) {
+      if (req.method === 'DELETE' && id && !verb) {
         if (running.has(id)) return json(res, 409, { error: 'Stop the turn and wait for it to finish before deleting this session.' });
         live.delete(id);
         await store.remove(id);
         return json(res, 200, { ok: true });
       }
-      if (req.method === 'PATCH' && id) {
+      if (req.method === 'PATCH' && id && !verb) {
         const session = live.get(id) ?? (await store.load(id, { repair: !running.has(id) }));
         const patch = await readBody(req);
         if (running.has(id)) return json(res, 409, { error: 'Wait for the current turn and integration to finish before editing this session.' });
@@ -1992,8 +1995,24 @@ const server = http.createServer(async (req, res) => {
         const { models } = await loadConfig(USER_DATA);
         return json(res, 200, tally(session.events, models));
       }
+      if (id && verb === 'pending') {
+        if (req.method === 'GET') return json(res, 200, { pending: messageQueue.pending(id) });
+        if (['PATCH', 'DELETE'].includes(req.method)) {
+          const body = await readBody(req);
+          const pending = messageQueue.pending(id);
+          if (!pending || pending.pendingId !== body.pendingId) return json(res, 409, { error: 'This message has already started or changed.' });
+          if (req.method === 'PATCH') {
+            if (typeof body.text !== 'string' || (!body.text.trim() && !pending.attachments?.length)) return json(res, 400, {error:'Enter a message.'});
+            messageQueue.edit(id, body.pendingId, body.text.trim());
+          } else messageQueue.cancel(id);
+          usageHistory?.record('queue.changed', {correlationId:requestId, outcome:req.method === 'PATCH' ? 'edited' : 'cancelled'});
+          broadcast(id, {kind:'pending', pending:messageQueue.pending(id)});
+          return json(res, 200, {pending:messageQueue.pending(id)});
+        }
+      }
       if (req.method === 'POST' && id && verb === 'stop') {
         messageQueue.cancel(id);
+        broadcast(id, {kind:"pending", pending:null});
         running.get(id)?.controller.abort();
         return json(res, 200, { ok: true });
       }
@@ -2008,7 +2027,7 @@ const server = http.createServer(async (req, res) => {
         });
         const live = running.get(id);
         res.write(`retry: 2000\n\ndata: ${JSON.stringify({
-          kind: 'hello',
+          kind: 'hello', pending: messageQueue.pending(id),
           running: Boolean(live),
           startedAt: live?.startedAt ?? null,
           last: live?.last ?? null,
@@ -2055,7 +2074,7 @@ const server = http.createServer(async (req, res) => {
         if ((!body.text || !String(body.text).trim()) && !body.attachments?.length) return json(res, 400, { error: 'Enter a message or attach a file.' });
         try {
           const queued = await scheduleTurn(id, { ...body, traceId: requestId }, verb === 'queue');
-          return json(res, queued ? 202 : 200, { ok: true, queued });
+          return json(res, queued ? 202 : 200, { ok: true, queued, pending: messageQueue.pending(id) });
         } catch (e) { return json(res, 409, { error: e.message }); }
       }
     }

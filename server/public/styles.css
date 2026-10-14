@@ -787,3 +787,7 @@ button.primary.danger:active { background: #db5f78; }
 #network-gate { position: fixed; inset: 0; z-index: 10000; background: var(--bg); color: var(--fg); padding: max(24px, env(safe-area-inset-top)) 24px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
 #network-gate[hidden] { display: none; }
 #network-gate p { max-width: 36rem; color: var(--fg-dim); overflow-wrap: anywhere; }
+
+#message-pending { padding: 10px 16px; background: var(--bg-2); border-top: 1px solid var(--line); max-height: 30vh; overflow: auto; }
+#message-pending .pending-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+#message-pending textarea { width: 100%; min-height: 70px; box-sizing: border-box; background: var(--bg-3); color: var(--fg); border: 1px solid var(--line); font: inherit; }
