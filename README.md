@@ -1,14 +1,63 @@
-# Distributed Orchestrator
+# The DO (Distributed Orchestrator)
 
-**DO is a place to work with AI on your projects, from your computer or phone.**
-Open a project, start a chat, and ask for what you want. Use different models in
-different tabs, connect more computers, and publish your changes with Push.
-You can even use DO to improve your own copy of DO.
+**Your projects, across your machines and models—with development history you keep.**
+
+The DO brings the computers on your private network into one development workspace.
+Run project sessions on different machines, switch models within a conversation,
+and work from your laptop or phone. Combine API models, coding subscriptions, and
+models running on your own GPUs. The DO keeps saved conversations and distributed
+session state on your computers so you can return to the work with its context.
+
+## Put your network to work
+
+- **Projects across machines.** Choose which computers hold each project and
+  where its tabs run. Use your laptop for one session and a powerful desktop for
+  another, from the same interface. The DO has no configured host-count limit;
+  practical capacity depends on your computers and network.
+- **Models you can mix and swap.** Bring API keys, signed-in coding CLI
+  subscriptions, or local models through Ollama and compatible model servers.
+  Use a GPU machine as a model host. Switch models mid-conversation with the
+  saved history, or give different tabs different models to develop and review
+  the same project. Each execution host exposes its own available sources.
+- **Distributed state with clear ownership.** The DO persists and synchronizes
+  session history, project records, and shared configuration between approved
+  hosts. Returning hosts catch up from replicated history and snapshots. Project
+  Git copies follow published changes; unfinished tab files stay on their owner.
+- **A development history you control.** Conversations, tool results, and project
+  context stay in The DO’s local storage on your hosts. Resume a saved session
+  without starting the explanation over. API and subscription requests still go
+  to the provider you choose; local model hosting is an alternative.
+
+The DO supports one computer or a growing network. With three or more hosts,
+shared writes require a majority. Two hosts prioritize availability and can
+produce conflicting histories during a split; those branches are archived for
+explicit recovery. There is no promise of unlimited scale or automatic merging
+of every offline edit. See [how distributed state works](docs/machines.md).
+
+## Ask The DO about what happened
+
+The DO records **local diagnostic traces** of meaningful actions, navigation,
+visible screen states, requests, timings, and failures. Correlation IDs connect
+browser actions to server work. In a DO session, you can ask:
+
+> “Check the recent traces from my machines and explain why that project did
+> not open, then fix the cause.”
+
+Sessions can inspect the authenticated diagnostics APIs across reachable hosts.
+Traces stay on the computer that recorded them and are combined on demand;
+an offline host means missing evidence. They are bounded and rotated, and omit
+message content, keystrokes, credentials, and screenshots. Manage recording and
+retention in **Settings → Usage history · diagnostics**. Saved conversations
+are separate from these diagnostic logs.
+
+The DO also instructs coding sessions to add useful, private, bounded tracing to
+the apps they build, so a later session can investigate a reported problem.
+See [trace locations and how sessions read them](docs/development.md).
 
 All screenshots below show the real interface with **fictional demo conversations,
 projects, and devices**. No personal chat history is included.
 
-![A coding chat and successful Push in DO](docs/images/chat-desktop.png)
+![A coding chat and successful Push in The DO](docs/images/chat-desktop.png)
 
 ## What you need
 
@@ -20,7 +69,7 @@ On each computer:
 - **GitHub CLI** if you want to connect GitHub and push changes.
 
 Mac and Windows are supported; Windows does not need WSL. Your computer runs the
-work, so keep it awake with DO running when you use your phone.
+work, so keep it awake with The DO running when you use your phone.
 
 ## Start your first computer
 
@@ -28,17 +77,17 @@ work, so keep it awake with DO running when you use your phone.
 2. Clone **your fork**. Replace `YOUR-USERNAME` below with your GitHub username:
 
    ```sh
-   git clone https://github.com/YOUR-USERNAME/Distributed-Orchestrator.git
-   cd Distributed-Orchestrator
+   git clone https://github.com/YOUR-USERNAME/The-DO.git
+   cd The-DO
    ```
 
 3. Open **start_mac.command** on Mac or **start_windows.cmd** on Windows.
-   The launcher installs dependencies and opens DO in your browser. Keep its terminal open.
+   The launcher installs dependencies and opens The DO in your browser. Keep its terminal open.
    You can also run `node scripts/start.mjs` from the repository folder.
 4. In **Settings → AI sources**, add the model you want to use.
 5. Open **☰ → new project**, then start a session and describe what you want.
 
-On that computer, DO is at **http://127.0.0.1:8787**.
+On that computer, The DO is at **http://127.0.0.1:8787**.
 To publish, connect your account under **Settings → GitHub connection**.
 AI subscriptions and API keys are separate options; install and sign in to a
 subscription CLI on the computer that will run it.
@@ -65,7 +114,7 @@ Use the displayed phone address, not `127.0.0.1`—that address only works on th
 ## Add more computers
 
 1. Install the requirements and clone **the same fork** on the new computer.
-2. Start DO there and connect Tailscale to the same network.
+2. Start The DO there and connect Tailscale to the same network.
 3. Enable **Phone access** on the first computer if you have not already.
 4. On the new computer, open **Settings → Machines** and select **request to join**
    beside your existing main computer.
@@ -78,31 +127,44 @@ its owning computer. See [the machine guide](docs/machines.md) for details.
 
 ![Connected computers and a phone viewer](docs/images/machines.png)
 
-## Make DO your own
+## Make The DO your own
 
-Open the built-in **Distributed Orchestrator** project and start a session.
+The DO can improve itself: open the built-in **Distributed Orchestrator** project
+(the current in-app label) and start a session.
 Ask for a change just as you would in any other project. Each coding tab works in
 its own isolated copy. When ready, press **Push** to merge, run the checks, and
-publish. Use **Restart** to load the updated DO.
+publish. Use **Restart** to load the updated The DO.
 
-![Editing your own DO in a dedicated session](docs/images/self-edit.png)
+![Customizing The DO in a dedicated session](docs/images/self-edit.png)
 
 **Your fork is the destination only if you cloned your fork.** Connecting GitHub
 signs you in; it does not create a fork or change the repository’s destination.
-Check it from your DO repository folder:
+Check it from the repository folder for your copy of The DO:
 
 ```sh
 git remote -v
 ```
 
 The `origin` fetch and push addresses should name **your account and your fork**,
-not `jakelurie/Distributed-Orchestrator`. If you cloned the original by mistake,
+not `spyjacob/The-DO`. If you cloned the original by mistake,
 start with a fresh clone of your fork before making changes. Without permission,
 GitHub rejects a push to someone else’s repository; it does not redirect it to yours.
 
-With that setup, your DO sessions push to **your repository**, not the author’s.
+With that setup, your sessions in The DO push to **your repository**, not the author’s.
 Use that same fork on every paired computer. Changes to your fork do not
 contribute back to the original repository unless you separately open a pull request.
+
+## Existing installations after the repository rename
+
+The repository is now [spyjacob/The-DO](https://github.com/spyjacob/The-DO).
+The DO’s existing installation folders, local data, host identities, and pairing
+settings do not need to change. A repository rename does not require deleting
+or resetting another computer.
+
+GitHub redirects Git operations from the previous repository address. Existing
+checkouts can keep using it; new clones should use the new name. Keep the old
+repository name unused so the redirect remains available. See
+[GitHub’s rename guidance](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository).
 
 ---
 
