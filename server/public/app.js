@@ -605,6 +605,7 @@ async function openSession(id) {
   } catch (e) {
     if (openingSession !== id) return;
     openingSession = null;
+    window.harnessTrace?.('visible', { screen: 'transcript', outcome: 'open-failed' });
     showBanner(e.message);
     drawTranscript();     // back to whatever was open before
     return;
@@ -616,8 +617,14 @@ async function openSession(id) {
   state.session = session;
   if (state.session?.id !== id) return;
   tabs.chat.session = session;
-  localStorage.setItem(sessionStorageKey, id);
-  if (session.appId) localStorage.setItem(`${sessionStorageKey}:app:${session.appId}`, id);
+  // A browser tab owns its selection; localStorage is shared by every window.
+  const url = new URL(location.href);
+  url.searchParams.set('session', id);
+  history.replaceState(history.state, '', url.href);
+  try {
+    sessionStorage.setItem(sessionStorageKey, id);
+    if (session.appId) sessionStorage.setItem(`${sessionStorageKey}:app:${session.appId}`, id);
+  } catch { /* The URL still preserves selection when storage is unavailable. */ }
 
   clearLive('chat');
   showSession();
@@ -672,7 +679,7 @@ function nextTabName(appId) {
 
 function projectSession(app) {
   const sessions = state.sessions.filter((s) => s.appId === app.id && !sessionOffline(s));
-  const remembered = localStorage.getItem(`${sessionStorageKey}:app:${app.id}`);
+  const remembered = sessionStorage.getItem(`${sessionStorageKey}:app:${app.id}`);
   return sessions.find((s) => s.id === state.session?.id)
     || sessions.find((s) => s.id === remembered) || sessions[0];
 }
@@ -3598,7 +3605,7 @@ setInterval(reconcile, 20_000);
 
 async function initializeApp() {
   try { await refreshState(); } catch (e) { showBanner(e.message); machinesSheet(); return; }
-  const last = new URLSearchParams(location.search).get('session') || localStorage.getItem(sessionStorageKey);
+  const last = new URLSearchParams(location.search).get('session') || sessionStorage.getItem(sessionStorageKey);
   if (last && state.sessions.some((s) => s.id === last)) await openSession(last);
   else paintHeader();
 }

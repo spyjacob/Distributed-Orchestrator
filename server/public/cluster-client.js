@@ -34,7 +34,10 @@
         const url = new URL('/', target.url);
         url.searchParams.set('t', saved.ticket);
         url.searchParams.set('viewer', viewer);
-        const session = localStorage.getItem('lastSession');
+        const current = new URL(location.href);
+        const node = current.searchParams.get('node');
+        if (node) url.searchParams.set('node', node);
+        const session = current.searchParams.get('session') || sessionStorage.getItem(`lastSession${node ? ':' + node : ''}`);
         if (session) url.searchParams.set('session', session);
         // Carry an unsent text draft without ever submitting it automatically.
         const draft = document.getElementById('input')?.value;

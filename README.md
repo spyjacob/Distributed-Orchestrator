@@ -247,3 +247,10 @@ Network/authentication failures and missing check configuration are reported;
 no AI retries credentials or force-pushes. Stop cancels the operation. Repair
 progress appears in the current chat and integration.repair diagnostics (without
 message content). The server validates results; model claims alone are not proof.
+
+Each browser window remembers its own selected chat across refreshes. Opening a
+chat updates the URL’s session parameter and window-local session storage; other
+windows cannot change that selection. Host failover carries the current window’s
+chat and execution node. Failed opens leave the previous selection intact and
+record a transcript `open-failed` event in the existing diagnostics history.
+Reproduce by opening different chats in two windows, then refreshing each.

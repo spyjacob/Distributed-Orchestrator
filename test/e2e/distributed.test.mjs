@@ -208,6 +208,44 @@ try {
   }
   // Exercise the served frontend with reordered status replies and tab switches.
   const frontend = await (await a.request('/app.js')).text();
+  // Separate browser windows share localStorage but restore their own chat.
+  const windowSessions = await Promise.all(['window one', 'window two'].map(name =>
+    a.call('/api/sessions', 'POST', {appId:'__harness', name, mode:'chat', model:'model-a'})));
+  const sharedStorage = new Map([['lastSession', 'obsolete-other-window']]);
+  const storage = map => ({getItem:key=>map.get(key)||null, setItem:(key,value)=>map.set(key,value)});
+  function selectionWindow(href, remembered = new Map()) {
+    const location = new URL(href);
+    const traces = [];
+    const context = vm.createContext({location, URL, URLSearchParams,
+      sessionStorageKey:'lastSession', sessionStorage:storage(remembered), localStorage:storage(sharedStorage),
+      history:{state:null, replaceState:(_state,_title,url)=>{location.href=new URL(url,location).href;}},
+      window:{harnessTrace:(event,details)=>traces.push({event,...details})},
+      state:{sessions:windowSessions, models:{}, session:null}, tabs:{chat:{}},
+      $:()=>({}), sessionOffline:()=>false, closeSheet(){}, clearLive(){}, showSession(){},
+      listen(){}, paintHeader(){}, showBanner(){}, drawTranscript(){}, machinesSheet(){},
+      refreshState:async()=>{}, api:route=>a.call(route),
+    });
+    vm.runInContext(frontend.slice(frontend.indexOf('let openingSession ='), frontend.indexOf('async function editTranscript(')), context);
+    vm.runInContext(frontend.slice(frontend.indexOf('async function initializeApp()'), frontend.indexOf('let networkChecking =')), context);
+    return {context, location, remembered, traces};
+  }
+  const firstWindow = selectionWindow('http://harness/?session=stale&node=test-node');
+  const secondWindow = selectionWindow('http://harness/');
+  await firstWindow.context.openSession(windowSessions[0].id);
+  await secondWindow.context.openSession(windowSessions[1].id);
+  assert.equal(firstWindow.location.searchParams.get('node'),'test-node');
+  assert.equal(firstWindow.location.searchParams.get('session'),windowSessions[0].id,'selection replaces stale deep link');
+  for (const [index, original] of [firstWindow, secondWindow].entries()) {
+    const refreshed = selectionWindow(original.location.href, original.remembered);
+    await refreshed.context.initializeApp();
+    assert.equal(refreshed.context.state.session.id,windowSessions[index].id,'refresh restores this window');
+  }
+  const beforeFailure = firstWindow.location.href;
+  firstWindow.context.api = async()=>{throw Error('Host unavailable');};
+  await firstWindow.context.openSession('missing-session');
+  assert.equal(firstWindow.location.href,beforeFailure,'failed navigation preserves last displayed chat');
+  assert.ok(firstWindow.traces.some(event=>event.outcome==='open-failed'));
+  assert.equal(sharedStorage.get('lastSession'),'obsolete-other-window','selection never writes shared browser storage');
   const restartNotice = {textContent:'', hidden:true};
   const noticeUi = vm.createContext({window:{}, $:()=>restartNotice});
   vm.runInContext(frontend.slice(frontend.indexOf('const pendingRestarts ='),frontend.indexOf('async function refreshState()')),noticeUi);
