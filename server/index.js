@@ -1901,6 +1901,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'DELETE' && id && !verb) {
         if (running.has(id)) return json(res, 409, { error: 'Stop the turn and wait for it to finish before deleting this session.' });
+        const removed = await store.load(id, { repair: false });
+        if (!cluster.shared() && removed.appId && removed.appId !== '__harness')
+          await apps.update(USER_DATA, removed.appId, {}).catch(e => { if (e.message !== 'no such app') throw e; });
         live.delete(id);
         await store.remove(id);
         return json(res, 200, { ok: true });

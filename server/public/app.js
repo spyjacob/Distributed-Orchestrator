@@ -741,22 +741,38 @@ function sessionOptionsSheet() {
     <button class="rowlink" id="session-edit">Edit session <span>›</span></button>
     <button class="rowlink" id="session-delete">Delete session <span>›</span></button>`);
   $('session-edit').onclick = sessionSettingsSheet;
-  $('session-delete').onclick = async () => {
-    if (!confirm('Delete this session?')) return;
-    try {
-      await api(`/api/sessions/${session.id}`, { method: 'DELETE' });
-      state.sessions = state.sessions.filter((s) => s.id !== session.id);
-      const next = state.sessions.find((s) => s.appId === session.appId);
-      if (next) await openSession(next.id);
-      else {
-        tabs.chat.stream?.close();
-        tabs.chat.session = state.session = null;
-        clearLive('chat');
-        showSession();
-        appsSheet();
-      }
-    } catch (e) { showBanner(e.message, true); }
-  };
+  $('session-delete').onclick = () => deleteSessionSheet(session);
+}
+
+async function deleteSessionSheet(session) {
+  try {
+    await refreshState();
+    const app = state.apps?.find(a => a.id === session.appId);
+    const last = app && app.id !== '__harness' && state.sessions.filter(s => s.appId === app.id).length === 1;
+    openSheet(`<h2>Delete session</h2><p>${last ? 'This is the last session in this project. Keep the project or delete it too?' : 'Delete this session and its transcript?'}</p>
+      <div class="actions"><button class="ghost" id="session-delete-back">cancel</button>
+      <button class="danger" id="session-delete-only">delete session</button></div>
+      ${last ? '<div class="actions"><button class="danger" id="session-delete-project">delete project too…</button></div>' : ''}`, 'delete-session');
+    $('session-delete-back').onclick = appsSheet;
+    $('session-delete-only').onclick = async () => {
+      try {
+        await api(`/api/sessions/${session.id}`, {method:'DELETE'});
+        if (state.session?.id === session.id) {
+          tabs.chat.stream?.close();
+          tabs.chat.session = state.session = null;
+          clearLive('chat'); showSession();
+        }
+        await appsSheet();
+      } catch(e) { showBanner(e.message, true); }
+    };
+    if (last) $('session-delete-project').onclick = async () => {
+      try {
+        const data = await api('/api/apps');
+        const project = data.apps.find(a => a.id === app.id);
+        if (project) await appDeleteSheet(project, true);
+      } catch(e) { showBanner(e.message, true); }
+    };
+  } catch(e) { showBanner(e.message, true); }
 }
 
 function showSession() {
@@ -2620,7 +2636,7 @@ async function appsSheet() {
  * asks gh for visibility, so a tap felt sluggish. Expansion is a pure view
  * change, so it re-renders from the cached data instead.
  */
-// Harness stays pinned; project recency comes from messages, not incidental saves.
+// Harness stays pinned; project edits and recent messages both count.
 function orderProjects(apps) {
   const latest = new Map();
   for (const session of state.sessions) {
@@ -2628,7 +2644,7 @@ function orderProjects(apps) {
       session.lastMessageAt ?? session.createdAt ?? 0));
   }
   return [...apps].sort((a, b) => Number(Boolean(b.builtin)) - Number(Boolean(a.builtin))
-    || (latest.get(b.id) || 0) - (latest.get(a.id) || 0));
+    || Math.max(latest.get(b.id) || 0, b.updatedAt || b.createdAt || 0) - Math.max(latest.get(a.id) || 0, a.updatedAt || a.createdAt || 0));
 }
 const openProjectGroups = new Set();
 
@@ -2817,12 +2833,8 @@ function renderAppsSheet(d) {
   $('sheet').querySelectorAll('[data-del]').forEach((el) => {
     el.onclick = async (e) => {
       e.stopPropagation();
-      const id = el.dataset.del;
-      if (!confirm('Delete this session?')) return;
-      await api(`/api/sessions/${id}`, { method: 'DELETE' });
-      if (state.session?.id === id) { state.session = null; drawTranscript(); paintHeader(); }
-      state.sessions = state.sessions.filter((x) => x.id !== id);   // gone now, not after the refetch
-      appsSheet();
+      const session = state.sessions.find(s => s.id === el.dataset.del);
+      if (session) await deleteSessionSheet(session);
     };
   });
 }
@@ -3100,7 +3112,7 @@ async function paintAppMachines(app, draft) {
  * at the same folder. Deleting the folder is neither, so it is off by default,
  * named in full, and needs a second tap that says what it is about to erase.
  */
-async function appDeleteSheet(app) {
+async function appDeleteSheet(app, deleteSessions = false) {
   let mine = [];
   try {
     await refreshState();
@@ -3114,10 +3126,10 @@ async function appDeleteSheet(app) {
       <label class="grow"><input type="checkbox" id="del-files" />
         the folder <span class="mono">${esc(shortDir(app.dir))}</span> and everything in it</label>
     </div>
-    <div class="item">
-      <label class="grow"><input type="checkbox" id="del-sessions" ${mine.length ? '' : 'disabled'} />
-        ${mine.length ? `its ${mine.length} session${mine.length === 1 ? '' : 's'} and their transcripts` : 'no sessions are attached'}</label>
-    </div>
+    ${mine.length ? `<div class="item">
+      <label class="grow"><input type="checkbox" id="del-sessions" ${deleteSessions ? 'checked' : ''} />
+        its ${mine.length} session${mine.length === 1 ? '' : 's'} and their transcripts</label>
+    </div>` : ''}
     ${app.repo ? `<div class="item"><label class="grow"><input type="checkbox" id="del-github" />
       its GitHub repository: ${esc(app.repo)}</label></div>
       <label>To delete GitHub too, type owner/repository</label>
@@ -3131,7 +3143,7 @@ async function appDeleteSheet(app) {
   const warn = () => {
     delete $('del-go').dataset.armed;
     const f = $('del-files').checked;
-    const s2 = $('del-sessions').checked;
+    const s2 = $('del-sessions')?.checked;
     const g = $('del-github')?.checked;
     $('del-warn').textContent = f || s2 || g
       ? `This cannot be undone. ${[g ? app.repo : null, f ? shortDir(app.dir) : null, s2 ? `${mine.length} transcript${mine.length === 1 ? '' : 's'}` : null].filter(Boolean).join(' and ')} will be erased.`
@@ -3139,7 +3151,7 @@ async function appDeleteSheet(app) {
     $('del-go').textContent = f || s2 || g ? 'delete permanently' : 'remove from orchestrator';
   };
   $('del-files').onchange = warn;
-  $('del-sessions').onchange = warn;
+  if ($('del-sessions')) $('del-sessions').onchange = warn;
   if ($('del-github')) $('del-github').onchange = warn;
   if ($('del-repo-confirm')) $('del-repo-confirm').oninput = warn;
   warn();
@@ -3147,7 +3159,7 @@ async function appDeleteSheet(app) {
   $('del-cancel').onclick = () => appEditSheet(app);
   $('del-go').onclick = async () => {
     const f = $('del-files').checked;
-    const s2 = $('del-sessions').checked;
+    const s2 = $('del-sessions')?.checked;
     const g = $('del-github')?.checked;
     // A second tap for the irreversible half, because this is a phone and the
     // first one is easy to hit by accident.

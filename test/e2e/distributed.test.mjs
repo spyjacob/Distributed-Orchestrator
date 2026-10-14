@@ -155,6 +155,11 @@ try {
   await fs.rename(path.join(a.dir,'diagnostics-saved'),path.join(a.dir,'diagnostics'));
   assert.ok((await a.call('/api/diagnostics')).failed > 0);
 
+  const emptyProject = await b.call('/api/apps', 'POST', {name:'Recently emptied',dir:path.join(root,'recently-emptied')});
+  const beforeDelete = Date.now();
+  await a.call(`/api/sessions/${emptyProject.sessionId}`, 'DELETE');
+  const emptyRecord = (await a.call('/api/apps')).apps.find(p => p.id === emptyProject.id);
+  assert.ok(emptyRecord.updatedAt >= beforeDelete, 'deletion preserves project recency across hosts');
   const joined = await a.call('/api/apps');
   assert.ok(joined.apps.some(p => p.id === existingProject.id));
   const importedId = `${existingProject.id}-${b.status.self}`;
@@ -224,6 +229,29 @@ try {
   assert.equal(historyElements.get('history-result').textContent,'History settings saved.');
   await historyElements.get('history-clear').onclick();
   assert.match(historyElements.get('history-result').textContent,/History cleared/);
+  let deleteHtml = '';
+  const deleteControls = new Map();
+  const deleteUi = vm.createContext({
+    state:{apps:[{id:emptyProject.id}],sessions:[]}, esc:String, shortDir:String,
+    refreshState:async()=>{}, openSheet:html=>{deleteHtml=html;deleteControls.clear();},
+    $:id=>{
+      if (!deleteHtml.includes('id="'+id+'"')) return null;
+      if (!deleteControls.has(id)) deleteControls.set(id,{dataset:{},checked:false});
+      return deleteControls.get(id);
+    },
+    appsSheet(){}, appEditSheet(){}, showBanner:message=>assert.fail(message)
+  });
+  vm.runInContext(frontend.slice(frontend.indexOf('async function appDeleteSheet('),frontend.indexOf('async function usageSheet(')),deleteUi);
+  await deleteUi.appDeleteSheet(emptyRecord);
+  assert.doesNotMatch(deleteHtml,/id="del-sessions"/);
+  vm.runInContext(frontend.slice(frontend.indexOf('async function deleteSessionSheet('),frontend.indexOf('function showSession()')),deleteUi);
+  deleteUi.state.sessions = [{id:'last-tab',appId:emptyProject.id}];
+  await deleteUi.deleteSessionSheet(deleteUi.state.sessions[0]);
+  assert.match(deleteHtml,/id="session-delete-project"/);
+  deleteUi.state.sessions.push({id:'other-tab',appId:emptyProject.id});
+  await deleteUi.deleteSessionSheet(deleteUi.state.sessions[0]);
+  assert.doesNotMatch(deleteHtml,/id="session-delete-project"/);
+
   // Drive the served recovery screen against the real API and a conflict archive.
   const archived = { id: 'archived-game', name: 'Archived game', dir: path.join(root, 'archived-game'), ownerNode: b.status.self };
   await fs.mkdir(archived.dir);
@@ -393,6 +421,8 @@ try {
     { id: '__harness', name: 'DO', builtin: true },
   ];
   assert.deepEqual(Array.from(ordering.orderProjects(projects), p => p.id), ['__harness', 'grocery', 'other']);
+  assert.deepEqual(Array.from(ordering.orderProjects([...projects, {id:'empty',updatedAt:Date.now()}]), p => p.id),
+    ['__harness','empty','grocery','other']);
   let projectHtml;
   const elements = new Map();
   Object.assign(ordering, {

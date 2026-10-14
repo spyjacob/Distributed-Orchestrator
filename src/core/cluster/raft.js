@@ -48,7 +48,16 @@ function blankState(initial) {
 export function applyCommand(state, c) {
   if (c.type === 'project-import') importProjects(state, c);
   else if (c.type === 'session') {
-    if (c.value === null) delete state.sessions[c.id]; else state.sessions[c.id] = c.value;
+    if (c.value === null) {
+      const appId = state.sessions[c.id]?.appId;
+      if (appId && c.at && state.values['settings:apps.json']) {
+        const registry = JSON.parse(state.values['settings:apps.json']);
+        const app = registry.apps.find(a => a.id === appId);
+        if (app) app.updatedAt = Math.max(app.updatedAt || 0, c.at);
+        state.values['settings:apps.json'] = JSON.stringify(registry);
+      }
+      delete state.sessions[c.id];
+    } else state.sessions[c.id] = c.value;
   } else if (c.type === 'viewer' || c.type === 'viewer-v2') {
     if (c.version === 2) {
       for (const [id, viewer] of Object.entries(state.viewers))

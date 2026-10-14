@@ -193,7 +193,7 @@ export async function list() {
 }
 
 export async function remove(id) {
-  if (shared()) return cluster.command({ type: 'session', id, value: null });
+  if (shared()) return cluster.command({ type: 'session', id, value: null, at: Date.now() });
   await fs.rm(fileFor(id), { force: true });
 }
 

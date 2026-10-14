@@ -51,7 +51,10 @@ on files or **chat** mode for conversation without tools. Apps with a start comm
 can be launched from their project card.
 
 **DO stays first in the project list.** Other projects are ordered by the latest
-message you sent in any of their sessions. Open a project to reach its sessions.
+project edit or message you sent in any of their sessions. Deleting a session
+counts as a project edit, even when it leaves the project empty. Deleting the
+last session offers a choice to keep the project or open its deletion options.
+Open a project to reach its sessions.
 
 Each coding session works in its own Git worktree, so sessions can edit separately.
 The built-in Harness project is where you change DO itself.
