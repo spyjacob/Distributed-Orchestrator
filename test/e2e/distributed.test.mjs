@@ -342,6 +342,7 @@ try {
   }]));
   let publishCalls = 0;
   const panel = vm.createContext({
+    closeSheet() {}, window: {},
     state: { session: { id: 'panel' } }, $: id => gitNodes.get(id),
     esc: String, clock: String, showBanner() {},
     api: async route => {
@@ -603,6 +604,23 @@ try {
   assert.equal(summary.machine, 'model-a', 'summary comes from the session owner');
   const attempted = await a.request('/api/git/push?session=' + summarySession.id, 'POST', { session: summarySession.id });
   assert.equal(attempted.status, 409, 'missing project checks still prevent publication');
+  const pushChat = await a.call('/api/sessions/' + summarySession.id);
+  assert.ok(pushChat.events.some(e => e.type === 'user' && e.operation === 'push'));
+  assert.ok(pushChat.events.some(e => e.publication === 'pushing'));
+  assert.ok(pushChat.events.some(e => e.type === 'assistant' && e.operation === 'push' && /Push did not complete/.test(e.text)));
+  assert.ok(!pushChat.turnHost);
+  const pushRemote = path.join(root, 'push-target.git');
+  git(root, 'init', '--bare', pushRemote);
+  git(summaryDir, 'remote', 'add', 'origin', pushRemote);
+  await fs.writeFile(path.join(work, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }));
+  const published = await a.call('/api/git/push?session=' + summarySession.id, 'POST', {session:summarySession.id});
+  assert.equal(published.pushed,true);
+  const publishedChat = await a.call('/api/sessions/' + summarySession.id);
+  assert.ok(publishedChat.events.some(e => e.type === 'assistant' && e.operation === 'push' && /Push done/.test(e.text)));
+  assert.ok(publishedChat.events.some(e => e.publication === 'published' && e.commitUrl !== undefined || e.pushReceipt?.status === 'Published'));
+  assert.ok(!publishedChat.turnHost);
+
+
   const readme = await fs.readFile(path.join(work, 'README.md'), 'utf8');
   assert.match(readme, /AI requirements/);
   assert.match(readme, /Analysis model/);

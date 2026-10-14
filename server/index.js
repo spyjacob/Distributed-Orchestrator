@@ -48,7 +48,7 @@ import { prepareTab, integrateTab, tabHasUnpublishedWork, pendingSummary, syncHa
 import { configureGithub, createGithubAuth } from '../src/core/github-auth.js';
 import { loadNotify, saveNotify, send as sendNotify, summarise, notificationSetupError } from '../src/core/notify.js';
 import * as store from '../src/core/store.js';
-import { noteEvent, tally } from '../src/core/transcript.js';
+import { noteEvent, userEvent, assistantEvent, tally } from '../src/core/transcript.js';
 import { eraseEvent, rewindTo } from '../src/core/rewind.js';
 import { normalizeProviderLimits, WINDOWS } from '../src/core/usage.js';
 import * as codexCli from '../src/core/providers/codex-cli.js';
@@ -1556,17 +1556,32 @@ const server = http.createServer(async (req, res) => {
           session.turnStartedAt = startedAt;
           await store.save(session);
         }
+        const announce = async event => {
+          session.events.push(event);
+          await store.save(session);
+          broadcast(id, { kind: 'event', event });
+        };
+        await announce({ ...userEvent('Push changes'), operation: 'push' });
+        broadcast(id, { kind: 'started', startedAt });
+        await announce(noteEvent('Push in progress · preparing changes.', { publication: 'pushing' }));
+        usageHistory?.record('push.started', { correlationId: requestId });
         const app = session.appId ? (await apps.load(USER_DATA)).find(a => a.id === session.appId) : null;
         const result = await integrateTab(session, {
           distributed: (await sessionPlacement(session)).distributed,
-          beforePublish: requireConnection,
+          beforePublish: async () => {
+            await requireConnection();
+            await announce(noteEvent('Checks passed · publishing to GitHub.', { publication: 'pushing' }));
+          },
           retryPush: true,
           autoCreatePrivate: Boolean(app && !app.builtin),
           appName: app?.name,
           aiDependencies: app && !app.builtin ? app.aiDependencies || [] : undefined,
           visibility,
           signal: running.get(id).controller.signal,
-          onCheck: (log) => upsertMonitor(USER_DATA, { id: `integration-${id}`, label: 'Integration checks', kind: 'file', path: log, session: id }),
+          onCheck: async log => {
+            await upsertMonitor(USER_DATA, { id: `integration-${id}`, label: 'Integration checks', kind: 'file', path: log, session: id });
+            await announce(noteEvent('Push in progress · running project checks.', { publication: 'pushing' }));
+          },
           push: true,
           model: session.model, servedModel: last?.servedModel,
         });
@@ -1580,16 +1595,21 @@ const server = http.createServer(async (req, res) => {
           sha: result.sha, commitUrl: result.commitUrl, publication: 'published',
           pushReceipt: { machine: cluster.self.name || cluster.self.id, status: result.pushed ? 'Published' : 'No changes', sha: result.sha, files: result.files?.length || 0 },
         });
-        session.events.push(note);
-        broadcast(id, { kind: 'event', event: note });
-        await store.save(session);
+        await announce(note);
+        await announce({ ...assistantEvent({ text: result.pushed
+          ? `Push done · ${result.files?.length || 0} files · ${result.sha}.${app?.builtin ? ' Restart Harness to load the changes.' : ''}`
+          : 'Already up to date. Nothing new to push.' }), operation: 'push' });
+        usageHistory?.record('push.finished', { correlationId: requestId, outcome: 'published', durationMs: Date.now() - startedAt });
         return json(res, 200, result);
       } catch (e) {
         const note = noteEvent(`Not published: ${e.message}`, { publication: 'failed',
           pushReceipt: { machine: cluster.self.name || cluster.self.id, status: 'Failed', error: e.message } });
-        session.events.push(note);
+        const reply = { ...assistantEvent({ text: `Push did not complete: ${e.message}` }), operation: 'push' };
+        session.events.push(note, reply);
         await store.save(session);
         broadcast(id, { kind: 'event', event: note });
+        broadcast(id, { kind: 'event', event: reply });
+        usageHistory?.record('push.finished', { correlationId: requestId, outcome: 'failed', durationMs: Date.now() - startedAt });
         return json(res, 409, { error: e.message });
       } finally {
         if (session.turnHost) {
@@ -1599,6 +1619,7 @@ const server = http.createServer(async (req, res) => {
         }
         live.delete(id);
         running.delete(id);
+        broadcast(id, { kind: 'done' });
       }
     }
 

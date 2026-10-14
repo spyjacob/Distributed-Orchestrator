@@ -2456,6 +2456,8 @@ async function paintGit(session) {
       paintPushStatus();
       button.textContent = 'Pushing…';
       button.disabled = true;
+      closeSheet();
+      window.harnessTrace?.('visible', {screen:'transcript',outcome:'push-starting'});
       try {
         const r = await api(`/api/git/push?session=${encodeURIComponent(session.id)}`, { method: 'POST', body: JSON.stringify({ session: session.id, visibility }) });
         showBanner(r.skipped === 'no changes' ? 'nothing to integrate'

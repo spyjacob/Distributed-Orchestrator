@@ -229,3 +229,8 @@ Offline peers do not delay the local version response. Stale peer observations
 are labelled unverified and cannot verify restart completion. Automatic restart
 coordination still performs fresh checks. Opening a conversation renders its
 transcript before refreshing the owning computer’s model inventory.
+
+Push opens the current project chat and records a separate “Push changes” entry,
+check/publish progress, and a concise completion or failure reply. The receipt
+and commit link remain in the transcript after refreshing. No model request is
+needed to report publication; server progress is streamed to connected viewers.
