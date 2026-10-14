@@ -979,7 +979,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return serveStatic(res, 'index.html');
     }
-    if (req.method === 'GET' && /^\/(app\.js|diagnostics\.js|voice\.js|cluster-client\.js|sw\.js|styles\.css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app-preview\.html|app-preview\.js|app-preview\.css|app\.js|diagnostics\.js|voice\.js|cluster-client\.js|sw\.js|styles\.css)$/.test(pathname)) {
       return serveStatic(res, pathname.slice(1));
     }
 

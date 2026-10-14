@@ -208,6 +208,34 @@ try {
   }
   // Exercise the served frontend with reordered status replies and tab switches.
   const frontend = await (await a.request('/app.js')).text();
+  // Stream into the saved progress slot, including collapsed progress and redraws.
+  const streamTab = { session: { model: 'demo', events: [{ type: 'user', id: 'question' }] }, live: null };
+  let progressChildren = [];
+  const activity = {};
+  const progress = { querySelector: () => activity, insertBefore(node, before) {
+    assert.equal(before, activity);
+    progressChildren = [node, activity];
+  } };
+  const streamUi = vm.createContext({ state: {tab:'chat',models:{}}, tabs: {chat:streamTab},
+    window: {harnessTrace() {}}, esc: String,
+    turnsFrom: events => events.map(user => ({user})), foldKey: turn => turn.user.id,
+    document: { getElementById(id) { assert.equal(id, 'fold-question'); return progress; },
+      createElement() { return { remove() { progressChildren = progressChildren.filter(n => n !== this); } }; } },
+  });
+  vm.runInContext(frontend.slice(frontend.indexOf('function mountLive('), frontend.indexOf('// ---------------------------------------------------------------- session')), streamUi);
+  const streaming = streamUi.liveTurn();
+  assert.equal(progressChildren[0], streaming, 'first delta starts inside progress, before tools');
+  assert.equal(streamUi.liveTurn(), streaming, 'subsequent chunks retain the same node');
+  progressChildren = []; // A transcript redraw creates a fresh progress body.
+  streamUi.mountLive();
+  assert.equal(progressChildren[0], streaming, 'redraw preserves the live reply');
+  progress.hidden = true;
+  streamUi.mountLive();
+  assert.equal(progress.hidden, true, 'streaming respects manually collapsed progress');
+  streamUi.clearLive();
+  assert.equal(streamTab.live, null);
+  assert.equal(progressChildren.includes(streaming), false);
+
   // Separate browser windows share localStorage but restore their own chat.
   const windowSessions = await Promise.all(['window one', 'window two'].map(name =>
     a.call('/api/sessions', 'POST', {appId:'__harness', name, mode:'chat', model:'model-a'})));

@@ -511,7 +511,7 @@ function turnHtml(turn, i, running, number, isLast) {
   const body = inner.join('').trim();
 
   const sum = foldSummary(turn, running);
-  if (body) bits.push(`<button class="fold ${sum.tone}${running ? ' live' : ''}" data-fold="${esc(key)}">
+  if (body || running) bits.push(`<button class="fold ${sum.tone}${running ? ' live' : ''}" data-fold="${esc(key)}">
       <span class="act-dot"></span>
       <span class="fold-label">Progress · ${sum.text}</span>
       <span class="act-caret">${open ? '▴' : '▾'}</span>
@@ -549,6 +549,7 @@ function drawTranscript() {
       i === turns.length - 1,
     ))
     .join('');
+  mountLive();
   scrollDown();
 }
 
@@ -558,7 +559,18 @@ function scrollDown(force = false) {
   if (force || pinned) el.scrollTop = el.scrollHeight;
 }
 
-// Streaming: append into a scratch turn that is replaced by the real event.
+// Streaming occupies the same progress slot as the saved commentary.
+function mountLive(tab = state.tab) {
+  const t = tabs[tab];
+  if (tab !== state.tab || !t.live) return;
+  const turns = turnsFrom(t.session?.events || []);
+  const i = turns.length - 1;
+  if (i < 0) return;
+  const progress = document.getElementById(`fold-${foldKey(turns[i], i)}`);
+  if (!progress) return;
+  progress.insertBefore(t.live, progress.querySelector(':scope > .act, :scope > .note'));
+}
+
 function liveTurn(tab = state.tab) {
   const t = tabs[tab];
   if (!t.live) {
@@ -566,8 +578,9 @@ function liveTurn(tab = state.tab) {
     div.className = 'turn assistant';
     div.innerHTML = `<div class="who"><span class="tag">${esc(state.models[t.session?.model]?.label || t.session?.model || '')}</span></div>
       <div class="thinking" hidden></div><div class="body"></div>`;
-    if (tab === state.tab) $('transcript').append(div);
     t.live = div;
+    mountLive(tab);
+    if (tab === state.tab) window.harnessTrace?.('visible', { screen: 'transcript', outcome: 'streaming-progress' });
   }
   return t.live;
 }
@@ -2787,6 +2800,11 @@ function renderAppsSheet(d) {
     const links = [];
     if (a.urls?.phone) links.push(`<a href="${esc(a.urls.phone)}" target="_blank" rel="noopener">phone: ${esc(a.urls.phone)}</a>`);
     if (a.urls?.desktop) links.push(`<a href="${esc(a.urls.desktop)}" target="_blank" rel="noopener">laptop: ${esc(a.urls.desktop)}</a>`);
+
+    if (a.urls?.phone || a.urls?.desktop) {
+      const preview = `/app-preview.html?app=${encodeURIComponent(a.id)}${executionNode ? `&node=${encodeURIComponent(executionNode)}` : ''}`;
+      links.push(`<a href="${preview}&layout=phone" target="_blank" rel="noopener">Phone layout</a> · <a href="${preview}&layout=desktop" target="_blank" rel="noopener">Desktop layout</a>`);
+    }
 
     // The built-in Distributed Orchestrator app is special: it *is* the running harness, its
     // sessions edit the orchestrator itself, and it cannot be started, edited as a

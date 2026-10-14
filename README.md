@@ -59,6 +59,38 @@ projects, and devices**. No personal chat history is included.
 
 ![A coding chat and successful Push in The DO](docs/images/chat-desktop.png)
 
+## Build an app, then use it
+
+Ask The DO to build an app with a frontend that works well on **both phone and
+computer**—readable layouts, touch-friendly controls, and roomier desktop views.
+These are responsive browser apps, not automatically compiled native iOS,
+Android, macOS, or Windows applications.
+
+> “Build a garden planner for my phone and computer. Register its start command
+> with The DO, launch it, and give me the links.”
+
+Once the project has a saved start command, The DO recognizes it as a launchable
+app in **Apps & Chats**. Use **▶** to start it and **■** to stop its server, from
+The DO on a phone or computer connected to its owning host. Closing an app's
+browser tab leaves its server running. The host must stay awake; controls from
+another host currently require using the process-owning host.
+
+Running, reachable apps offer a **phone / away-from-home address** through
+Tailscale and a **local laptop address** for the hosting computer. Those are
+connection choices. The separate **Phone layout** and **Desktop layout** links
+preview the app at a fixed viewport on either device: inspect the desktop layout
+from your phone, or the phone layout from your computer. Switch sizes within the
+preview without reopening the app.
+
+Previews use the real app and its data, so actions have real effects. They scale
+390 × 844 or 1280 × 900 viewports to fit; they do not emulate another operating
+system, touch hardware, or browser. Apps that block embedding must be opened
+directly. Remote previews need the app's working Tailscale address.
+
+Don't like the app, the layout, or how The DO works? Tell a session what to
+change. For changes to The DO itself, use its built-in project, review the result,
+then **Push** and **Restart**.
+
 ## What you need
 
 On each computer:

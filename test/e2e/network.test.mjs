@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,6 +45,42 @@ try {
   await pause(2200);
   assert.equal((await (await request('/api/network')).json()).connected, true);
   assert.equal((await request('/api/state')).status, 200, 'same process recovers without a restart');
+  // Execute the served preview against the real app registry (empty/error),
+  // then a reachable app fixture; check viewport choice and honest load traces.
+  assert.equal((await request('/app-preview.html')).status, 200);
+  const previewSource = await (await request('/app-preview.js')).text();
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, { style: {}, clientWidth: 366,
+      setAttribute(k, v) { this[k] = v; }, hasAttribute(k) { return Boolean(this[k]); } });
+    return elements.get(id);
+  };
+  const traces = [];
+  let appReply;
+  const preview = vm.createContext({ URL, URLSearchParams, clearTimeout, setTimeout: () => 1,
+    location: { search: '?app=demo&layout=desktop', hostname: '127.0.0.1', protocol: 'http:', pathname: '/app-preview.html' },
+    history: { replaceState() {} }, document: { getElementById: element },
+    window: { addEventListener() {}, harnessTrace: (event, details) => traces.push(details) },
+    fetch: () => appReply ? Promise.resolve(Response.json(appReply)) : request('/api/apps'),
+  });
+  vm.runInContext(previewSource, preview);
+  await pause(100);
+  assert.match(element('preview-status').textContent, /stopped/);
+  assert.equal(traces.at(-1).outcome, 'error');
+  appReply = { apps: [{ id: 'demo', name: 'Demo', running: true, reachable: true, urls: { desktop: 'http://127.0.0.1:4321' } }] };
+  vm.runInContext(previewSource, preview);
+  await pause(10);
+  assert.equal(element('preview-frame').src, 'http://127.0.0.1:4321/');
+  assert.equal(element('preview-frame').style.width, '1280px');
+  element('preview-phone').onclick();
+  assert.equal(element('preview-frame').style.width, '390px');
+  element('preview-frame').onload();
+  assert.equal(traces.at(-1).outcome, 'frame-loaded');
+  assert.match(element('preview-status').textContent, /does not confirm app success/);
+  preview.location.hostname = 'remote.example';
+  vm.runInContext(previewSource, preview);
+  await pause(10);
+  assert.match(element('preview-status').textContent, /Phone access address/);
   const sources = async body => {
     const response = await fetch(`http://127.0.0.1:${port}/api/cluster/sources`, {
       method: 'POST', headers: { 'x-harness-token': 'network-test', 'Content-Type': 'application/json' }, body: JSON.stringify(body),

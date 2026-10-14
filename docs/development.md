@@ -148,3 +148,10 @@ windows cannot change that selection. Host failover carries the current windowâ€
 chat and execution node. Failed opens leave the previous selection intact and
 record a transcript `open-failed` event in the existing diagnostics history.
 Reproduce by opening different chats in two windows, then refreshing each.
+
+App layout previews emit `visible` events with screen `preview-phone` or
+`preview-desktop` and outcomes `loading`, `resized`, `frame-loaded`, `timeout`,
+or `error`. Frame load only confirms navigation, not successful rendering of a
+cross-origin app. Reproduce from a running project's layout links, switch sizes,
+then open a stopped project's preview to exercise the error path. Events use the
+same bounded diagnostics storage and authenticated APIs described above.
